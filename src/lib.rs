@@ -257,7 +257,7 @@ fn lookup_book_records_for_images(lookup: &RsLookupWrapper) -> FnResult<Vec<Open
             records.extend(fetch_by_work(work_id)?);
         }
 
-        return Ok(deduplicate_records(records));
+        return Ok(records);
     }
 
     lookup_book_records(lookup)

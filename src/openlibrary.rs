@@ -359,14 +359,15 @@ pub fn merge_work_with_edition(
         return work;
     };
 
-    let mut cover_ids = if edition.cover_ids.is_empty() {
-        work.cover_ids.clone()
-    } else {
-        edition.cover_ids.clone()
-    };
+    let mut cover_ids = work.cover_ids.clone();
+    for cover_id in edition.cover_ids.iter().copied() {
+        if !cover_ids.contains(&cover_id) {
+            cover_ids.push(cover_id);
+        }
+    }
     if cover_ids.is_empty() {
-        cover_ids.extend(edition.cover_id);
         cover_ids.extend(work.cover_id);
+        cover_ids.extend(edition.cover_id);
     }
 
     OpenLibraryBookRecord {
@@ -452,6 +453,29 @@ mod tests {
         let record = book_record_from_edition_response(&response);
         assert_eq!(record.cover_ids, vec![12345, 67890]);
         assert_eq!(record.cover_id, Some(12345));
+    }
+
+    #[test]
+    fn merge_work_with_edition_keeps_all_cover_ids() {
+        let work = OpenLibraryBookRecord {
+            title: "The Hobbit".to_string(),
+            work_id: Some("OL45804W".to_string()),
+            cover_ids: vec![2701529, 2701530, 6307679],
+            cover_id: Some(2701529),
+            ..Default::default()
+        };
+
+        let edition = OpenLibraryBookRecord {
+            title: "The Hobbit".to_string(),
+            edition_id: Some("OL7353617M".to_string()),
+            cover_ids: vec![2701530, 9999999],
+            cover_id: Some(2701530),
+            ..Default::default()
+        };
+
+        let merged = merge_work_with_edition(work, Some(edition));
+        assert_eq!(merged.cover_ids, vec![2701529, 2701530, 6307679, 9999999]);
+        assert_eq!(merged.cover_id, Some(2701529));
     }
 }
 fn positive_cover_id(value: i64) -> Option<u64> {

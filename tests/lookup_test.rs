@@ -197,6 +197,30 @@ fn test_lookup_images_by_openlibrary_work_id() {
 }
 
 #[test]
+fn test_lookup_images_by_openlibrary_work_id_with_multiple_covers() {
+    let mut plugin = build_plugin();
+
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            name: None,
+            ids: Some(RsIds {
+                openlibrary_work_id: Some("OL5961788W".to_string()),
+                ..Default::default()
+            }),
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let images = call_lookup_images(&mut plugin, &input);
+    let images_array = images.as_array().expect("Expected an array");
+    assert!(
+        images_array.len() >= 3,
+        "Expected at least three images from work covers for OL5961788W"
+    );
+}
+
+#[test]
 fn test_lookup_images_by_isbn13_id() {
     let mut plugin = build_plugin();
 
@@ -229,9 +253,9 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
             ids: Some(RsIds {
-                isbn13: Some("9780140328721".to_string()),
-                openlibrary_edition_id: Some("OL7353617M".to_string()),
-                openlibrary_work_id: Some("OL45804W".to_string()),
+                isbn13: Some("9783734163364".to_string()),
+                openlibrary_edition_id: Some("OL50550144M".to_string()),
+                openlibrary_work_id: Some("OL5961788W".to_string()),
                 ..Default::default()
             }),
         }),
@@ -241,9 +265,10 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
 
     let images = call_lookup_images(&mut plugin, &input);
     let images_array = images.as_array().expect("Expected an array");
+    println!("Images found: {:?}", images_array);
     assert!(
-        !images_array.is_empty(),
-        "Expected at least one image when fetching by multiple IDs"
+        images_array.len() >= 3,
+        "Expected multiple images when fetching by multiple IDs including a multi-cover work"
     );
 
     let urls: Vec<String> = images_array
