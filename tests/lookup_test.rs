@@ -169,3 +169,53 @@ fn test_lookup_images_by_openlibrary_edition_id() {
         "Expected at least one image when fetching by edition ID"
     );
 }
+
+#[test]
+fn test_lookup_images_by_openlibrary_work_id() {
+    let mut plugin = build_plugin();
+
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            name: None,
+            ids: Some(RsIds {
+                openlibrary_work_id: Some("OL11967339W".to_string()),
+                ..Default::default()
+            }),
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let images = call_lookup_images(&mut plugin, &input);
+    let images_array = images.as_array().expect("Expected an array");
+    assert!(
+        !images_array.is_empty(),
+        "Expected at least one image when fetching by work ID"
+    );
+    println!("Images found: {:?}", images_array);
+}
+
+#[test]
+fn test_lookup_images_by_isbn13_id() {
+    let mut plugin = build_plugin();
+
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            name: None,
+            ids: Some(RsIds {
+                isbn13: Some("9780143143390".to_string()),
+                ..Default::default()
+            }),
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let images = call_lookup_images(&mut plugin, &input);
+    let images_array = images.as_array().expect("Expected an array");
+    assert!(
+        !images_array.is_empty(),
+        "Expected at least one image when fetching by isbn13 ID"
+    );
+    println!("Images found: {:?}", images_array);
+}
