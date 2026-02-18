@@ -21,9 +21,9 @@ fn canonical_rs_id(record: &OpenLibraryBookRecord) -> Option<String> {
         ..Default::default()
     };
 
-    ids.as_openlibrary_edition_id()
+    ids.as_isbn13()
+        .or(ids.as_openlibrary_edition_id())
         .or(ids.as_openlibrary_work_id())
-        .or(ids.as_isbn13())
 }
 
 fn fallback_local_id(title: &str) -> String {
