@@ -137,6 +137,35 @@ fn fetch_by_search(search: &str) -> FnResult<Vec<OpenLibraryBookRecord>> {
         .collect())
 }
 
+fn normalize_exact_isbn_search(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let compact: String = trimmed
+        .chars()
+        .filter(|c| *c != '-' && !c.is_ascii_whitespace())
+        .collect();
+
+    if compact.len() == 13 && compact.chars().all(|c| c.is_ascii_digit()) {
+        return Some(compact);
+    }
+
+    if compact.len() != 10 {
+        return None;
+    }
+
+    let mut chars = compact.chars();
+    let last = chars.next_back()?;
+    let body = chars.as_str();
+    if body.chars().all(|c| c.is_ascii_digit()) && (last.is_ascii_digit() || last == 'X' || last == 'x') {
+        return Some(format!("{body}{}", last.to_ascii_uppercase()));
+    }
+
+    None
+}
+
 fn deduplicate_records(records: Vec<OpenLibraryBookRecord>) -> Vec<OpenLibraryBookRecord> {
     let mut seen = HashSet::new();
     let mut deduped = Vec::new();
@@ -151,9 +180,17 @@ fn deduplicate_records(records: Vec<OpenLibraryBookRecord>) -> Vec<OpenLibraryBo
 }
 
 fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBookRecord>> {
-    let Some(ids) = extract_book_ids(&lookup.query) else {
+    let Some(mut ids) = extract_book_ids(&lookup.query) else {
         return Ok(vec![]);
     };
+
+    if ids.isbn13.is_none() {
+        if let RsLookupQuery::Book(book) = &lookup.query {
+            if let Some(name) = book.name.as_deref() {
+                ids.isbn13 = normalize_exact_isbn_search(name);
+            }
+        }
+    }
 
     let records = if let Some(isbn13) = ids.isbn13 {
         fetch_by_isbn(&isbn13)?
@@ -228,5 +265,32 @@ mod tests {
         assert_eq!(ids.isbn13, Some("9780140328721".to_string()));
         assert_eq!(ids.edition_id, Some("OL7353617M".to_string()));
         assert_eq!(ids.work_id, Some("OL45804W".to_string()));
+    }
+
+    #[test]
+    fn normalize_exact_isbn_search_accepts_isbn13() {
+        assert_eq!(
+            normalize_exact_isbn_search("978-0-14-032872-1"),
+            Some("9780140328721".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_exact_isbn_search_accepts_isbn10_with_x() {
+        assert_eq!(
+            normalize_exact_isbn_search("0-684-84328-5"),
+            Some("0684843285".to_string())
+        );
+        assert_eq!(
+            normalize_exact_isbn_search("0-8044-2957-x"),
+            Some("080442957X".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_exact_isbn_search_rejects_non_exact_values() {
+        assert_eq!(normalize_exact_isbn_search("The Hobbit 9780140328721"), None);
+        assert_eq!(normalize_exact_isbn_search("isbn 9780140328721"), None);
+        assert_eq!(normalize_exact_isbn_search(""), None);
     }
 }
