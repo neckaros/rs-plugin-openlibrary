@@ -3,6 +3,7 @@ use rs_plugin_common_interfaces::{
     domain::rs_ids::RsIds,
     lookup::{RsLookupBook, RsLookupQuery, RsLookupWrapper},
 };
+use std::collections::HashSet;
 
 fn build_plugin() -> Plugin {
     let wasm = Wasm::file("target/wasm32-unknown-unknown/release/rs_plugin_openlibrary.wasm");
@@ -218,4 +219,45 @@ fn test_lookup_images_by_isbn13_id() {
         "Expected at least one image when fetching by isbn13 ID"
     );
     println!("Images found: {:?}", images_array);
+}
+
+#[test]
+fn test_lookup_images_by_multiple_ids_is_deduplicated() {
+    let mut plugin = build_plugin();
+
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            name: None,
+            ids: Some(RsIds {
+                isbn13: Some("9780140328721".to_string()),
+                openlibrary_edition_id: Some("OL7353617M".to_string()),
+                openlibrary_work_id: Some("OL45804W".to_string()),
+                ..Default::default()
+            }),
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let images = call_lookup_images(&mut plugin, &input);
+    let images_array = images.as_array().expect("Expected an array");
+    assert!(
+        !images_array.is_empty(),
+        "Expected at least one image when fetching by multiple IDs"
+    );
+
+    let urls: Vec<String> = images_array
+        .iter()
+        .filter_map(|image| image.get("url"))
+        .filter_map(|url| url.get("url"))
+        .filter_map(|url| url.as_str())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    let unique_count = urls.iter().cloned().collect::<HashSet<_>>().len();
+    assert_eq!(
+        urls.len(),
+        unique_count,
+        "Expected deduplicated image URLs when multiple IDs are provided"
+    );
 }

@@ -179,6 +179,19 @@ fn deduplicate_records(records: Vec<OpenLibraryBookRecord>) -> Vec<OpenLibraryBo
     deduped
 }
 
+fn deduplicate_images(images: Vec<ExternalImage>) -> Vec<ExternalImage> {
+    let mut seen_urls = HashSet::new();
+    let mut deduped = Vec::new();
+
+    for image in images {
+        if seen_urls.insert(image.url.url.clone()) {
+            deduped.push(image);
+        }
+    }
+
+    deduped
+}
+
 fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBookRecord>> {
     let Some(mut ids) = extract_book_ids(&lookup.query) else {
         return Ok(vec![]);
@@ -218,6 +231,38 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBook
     Ok(deduplicate_records(records))
 }
 
+fn lookup_book_records_for_images(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBookRecord>> {
+    let Some(mut ids) = extract_book_ids(&lookup.query) else {
+        return Ok(vec![]);
+    };
+
+    if ids.isbn13.is_none() {
+        if let RsLookupQuery::Book(book) = &lookup.query {
+            if let Some(name) = book.name.as_deref() {
+                ids.isbn13 = normalize_exact_isbn_search(name);
+            }
+        }
+    }
+
+    if ids.isbn13.is_some() || ids.edition_id.is_some() || ids.work_id.is_some() {
+        let mut records = Vec::new();
+
+        if let Some(isbn13) = ids.isbn13.as_deref() {
+            records.extend(fetch_by_isbn(isbn13)?);
+        }
+        if let Some(edition_id) = ids.edition_id.as_deref() {
+            records.extend(fetch_by_edition(edition_id)?);
+        }
+        if let Some(work_id) = ids.work_id.as_deref() {
+            records.extend(fetch_by_work(work_id)?);
+        }
+
+        return Ok(deduplicate_records(records));
+    }
+
+    lookup_book_records(lookup)
+}
+
 #[plugin_fn]
 pub fn lookup_metadata(
     Json(lookup): Json<RsLookupWrapper>,
@@ -234,14 +279,14 @@ pub fn lookup_metadata(
 pub fn lookup_metadata_images(
     Json(lookup): Json<RsLookupWrapper>,
 ) -> FnResult<Json<Vec<ExternalImage>>> {
-    let all_books = lookup_book_records(&lookup)?;
+    let all_books = lookup_book_records_for_images(&lookup)?;
 
     let images: Vec<ExternalImage> = all_books
         .into_iter()
         .flat_map(|book| openlibrary_book_to_images(&book))
         .collect();
 
-    Ok(Json(images))
+    Ok(Json(deduplicate_images(images)))
 }
 
 #[cfg(test)]
@@ -292,5 +337,43 @@ mod tests {
         assert_eq!(normalize_exact_isbn_search("The Hobbit 9780140328721"), None);
         assert_eq!(normalize_exact_isbn_search("isbn 9780140328721"), None);
         assert_eq!(normalize_exact_isbn_search(""), None);
+    }
+
+    #[test]
+    fn deduplicate_images_by_url() {
+        let images = vec![
+            ExternalImage {
+                url: rs_plugin_common_interfaces::RsRequest {
+                    url: "https://covers.openlibrary.org/b/id/1-L.jpg".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ExternalImage {
+                url: rs_plugin_common_interfaces::RsRequest {
+                    url: "https://covers.openlibrary.org/b/id/1-L.jpg".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ExternalImage {
+                url: rs_plugin_common_interfaces::RsRequest {
+                    url: "https://covers.openlibrary.org/b/id/2-L.jpg".to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+
+        let deduped = deduplicate_images(images);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(
+            deduped[0].url.url,
+            "https://covers.openlibrary.org/b/id/1-L.jpg"
+        );
+        assert_eq!(
+            deduped[1].url.url,
+            "https://covers.openlibrary.org/b/id/2-L.jpg"
+        );
     }
 }
