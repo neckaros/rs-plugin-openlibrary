@@ -111,6 +111,7 @@ pub struct OpenLibraryBookRecord {
     pub edition_id: Option<String>,
     pub work_id: Option<String>,
     pub isbn13: Option<String>,
+    pub cover_ids: Vec<u64>,
     pub cover_id: Option<u64>,
     pub publish_year: Option<u16>,
     pub description: Option<String>,
@@ -265,6 +266,7 @@ pub fn book_record_from_search_doc(doc: &OpenLibrarySearchDoc) -> Option<OpenLib
         edition_id,
         work_id,
         isbn13: first_isbn13(&doc.isbn),
+        cover_ids: doc.cover_i.and_then(positive_cover_id).into_iter().collect(),
         cover_id: doc.cover_i.and_then(positive_cover_id),
         publish_year: doc.first_publish_year,
         description: None,
@@ -289,6 +291,8 @@ pub fn book_record_from_edition_response(
         .as_deref()
         .and_then(extract_year_from_text);
 
+    let cover_ids = extract_cover_ids(&response.covers);
+
     OpenLibraryBookRecord {
         title: response.title.trim().to_string(),
         edition_id: normalize_openlibrary_id(&response.key, "books"),
@@ -297,11 +301,8 @@ pub fn book_record_from_edition_response(
             .first()
             .and_then(|work| normalize_openlibrary_id(&work.key, "works")),
         isbn13: first_isbn13(&response.isbn_13),
-        cover_id: response
-            .covers
-            .iter()
-            .copied()
-            .find_map(positive_cover_id),
+        cover_id: cover_ids.first().copied(),
+        cover_ids,
         publish_year,
         description,
         pages: response.number_of_pages.and_then(positive_u32),
@@ -316,16 +317,15 @@ pub fn book_record_from_edition_response(
 }
 
 pub fn book_record_from_work_response(response: &OpenLibraryWorkResponse) -> OpenLibraryBookRecord {
+    let cover_ids = extract_cover_ids(&response.covers);
+
     OpenLibraryBookRecord {
         title: response.title.trim().to_string(),
         edition_id: None,
         work_id: normalize_openlibrary_id(&response.key, "works"),
         isbn13: None,
-        cover_id: response
-            .covers
-            .iter()
-            .copied()
-            .find_map(positive_cover_id),
+        cover_id: cover_ids.first().copied(),
+        cover_ids,
         publish_year: response
             .first_publish_date
             .as_deref()
@@ -359,6 +359,16 @@ pub fn merge_work_with_edition(
         return work;
     };
 
+    let mut cover_ids = if edition.cover_ids.is_empty() {
+        work.cover_ids.clone()
+    } else {
+        edition.cover_ids.clone()
+    };
+    if cover_ids.is_empty() {
+        cover_ids.extend(edition.cover_id);
+        cover_ids.extend(work.cover_id);
+    }
+
     OpenLibraryBookRecord {
         title: if work.title.is_empty() {
             edition.title
@@ -368,7 +378,8 @@ pub fn merge_work_with_edition(
         edition_id: edition.edition_id.or(work.edition_id),
         work_id: work.work_id.or(edition.work_id),
         isbn13: edition.isbn13.or(work.isbn13),
-        cover_id: edition.cover_id.or(work.cover_id),
+        cover_id: cover_ids.first().copied().or(edition.cover_id).or(work.cover_id),
+        cover_ids,
         publish_year: edition.publish_year.or(work.publish_year),
         description: work.description.or(edition.description),
         pages: edition.pages.or(work.pages),
@@ -422,6 +433,26 @@ mod tests {
         let values = vec!["978-0-14-032872-1".to_string(), "0140328726".to_string()];
         assert_eq!(first_isbn13(&values), Some("9780140328721".to_string()));
     }
+
+    #[test]
+    fn edition_response_maps_all_positive_cover_ids() {
+        let response = OpenLibraryEditionResponse {
+            key: "/books/OL7353617M".to_string(),
+            title: "The Hobbit".to_string(),
+            description: None,
+            works: vec![],
+            isbn_13: vec![],
+            covers: vec![12345, 0, -1, 67890, 12345],
+            number_of_pages: None,
+            publish_date: None,
+            languages: vec![],
+            publishers: vec![],
+        };
+
+        let record = book_record_from_edition_response(&response);
+        assert_eq!(record.cover_ids, vec![12345, 67890]);
+        assert_eq!(record.cover_id, Some(12345));
+    }
 }
 fn positive_cover_id(value: i64) -> Option<u64> {
     if value > 0 {
@@ -429,6 +460,18 @@ fn positive_cover_id(value: i64) -> Option<u64> {
     } else {
         None
     }
+}
+
+fn extract_cover_ids(values: &[i64]) -> Vec<u64> {
+    let mut cover_ids = Vec::new();
+    for value in values {
+        if let Some(cover_id) = positive_cover_id(*value) {
+            if !cover_ids.contains(&cover_id) {
+                cover_ids.push(cover_id);
+            }
+        }
+    }
+    cover_ids
 }
 
 fn positive_u32(value: i64) -> Option<u32> {

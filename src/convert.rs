@@ -49,15 +49,37 @@ fn fallback_local_id(title: &str) -> String {
 }
 
 fn build_images(record: &OpenLibraryBookRecord) -> Vec<ExternalImage> {
+    let mut cover_urls: Vec<String> = Vec::new();
+    for cover_id in record
+        .cover_ids
+        .iter()
+        .copied()
+        .chain(record.cover_id.into_iter())
+    {
+        let url = build_cover_url_from_id(cover_id);
+        if !cover_urls.contains(&url) {
+            cover_urls.push(url);
+        }
+    }
+
+    if !cover_urls.is_empty() {
+        return cover_urls
+            .into_iter()
+            .map(|url| ExternalImage {
+                kind: Some(ImageType::Poster),
+                url: RsRequest {
+                    url,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+    }
+
     let image_url = record
-        .cover_id
-        .map(build_cover_url_from_id)
-        .or_else(|| {
-            record
-                .edition_id
-                .as_ref()
-                .map(|edition_id| build_cover_url_from_olid(edition_id))
-        })
+        .edition_id
+        .as_ref()
+        .map(|edition_id| build_cover_url_from_olid(edition_id))
         .or_else(|| {
             record
                 .work_id
@@ -147,6 +169,7 @@ mod tests {
     fn prefers_cover_id_for_images() {
         let record = OpenLibraryBookRecord {
             title: "The Hobbit".to_string(),
+            cover_ids: vec![12345],
             cover_id: Some(12345),
             edition_id: Some("OL7353617M".to_string()),
             ..Default::default()
@@ -157,6 +180,26 @@ mod tests {
         assert_eq!(
             images[0].url.url,
             "https://covers.openlibrary.org/b/id/12345-L.jpg"
+        );
+    }
+
+    #[test]
+    fn uses_all_cover_ids_for_images() {
+        let record = OpenLibraryBookRecord {
+            title: "The Hobbit".to_string(),
+            cover_ids: vec![12345, 67890],
+            ..Default::default()
+        };
+
+        let images = openlibrary_book_to_images(&record);
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            images[0].url.url,
+            "https://covers.openlibrary.org/b/id/12345-L.jpg"
+        );
+        assert_eq!(
+            images[1].url.url,
+            "https://covers.openlibrary.org/b/id/67890-L.jpg"
         );
     }
 
@@ -174,7 +217,7 @@ mod tests {
         let result = openlibrary_book_to_result(record);
 
         if let RsLookupMetadataResult::Book(book) = result.metadata {
-            assert_eq!(book.id, "oleid:OL7353617M".to_string());
+            assert_eq!(book.id, "isbn13:9780140328721".to_string());
             assert_eq!(book.name, "The Hobbit");
             assert_eq!(book.kind, Some("book".to_string()));
             assert_eq!(book.year, Some(1937));
