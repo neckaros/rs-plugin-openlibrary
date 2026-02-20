@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use rs_plugin_common_interfaces::{
     domain::external_images::ExternalImage,
-    lookup::{RsLookupMetadataResultWithImages, RsLookupQuery, RsLookupWrapper},
+    lookup::{RsLookupMetadataResultWrapper, RsLookupQuery, RsLookupWrapper},
     PluginInformation, PluginType,
 };
 
@@ -25,7 +25,7 @@ pub fn infos() -> FnResult<Json<PluginInformation>> {
     Ok(Json(PluginInformation {
         name: "openlibrary_metadata".into(),
         capabilities: vec![PluginType::LookupMetadata],
-        version: 3,
+        version: 4,
         interface_version: 1,
         repo: Some("https://github.com/neckaros/rs-plugin-openlibrary".into()),
         publisher: "neckaros".into(),
@@ -159,7 +159,9 @@ fn normalize_exact_isbn_search(value: &str) -> Option<String> {
     let mut chars = compact.chars();
     let last = chars.next_back()?;
     let body = chars.as_str();
-    if body.chars().all(|c| c.is_ascii_digit()) && (last.is_ascii_digit() || last == 'X' || last == 'x') {
+    if body.chars().all(|c| c.is_ascii_digit())
+        && (last.is_ascii_digit() || last == 'X' || last == 'x')
+    {
         return Some(format!("{body}{}", last.to_ascii_uppercase()));
     }
 
@@ -231,7 +233,9 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBook
     Ok(deduplicate_records(records))
 }
 
-fn lookup_book_records_for_images(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBookRecord>> {
+fn lookup_book_records_for_images(
+    lookup: &RsLookupWrapper,
+) -> FnResult<Vec<OpenLibraryBookRecord>> {
     let Some(mut ids) = extract_book_ids(&lookup.query) else {
         return Ok(vec![]);
     };
@@ -266,11 +270,13 @@ fn lookup_book_records_for_images(lookup: &RsLookupWrapper) -> FnResult<Vec<Open
 #[plugin_fn]
 pub fn lookup_metadata(
     Json(lookup): Json<RsLookupWrapper>,
-) -> FnResult<Json<Vec<RsLookupMetadataResultWithImages>>> {
+) -> FnResult<Json<Vec<RsLookupMetadataResultWrapper>>> {
     let all_books = lookup_book_records(&lookup)?;
 
-    let results: Vec<RsLookupMetadataResultWithImages> =
-        all_books.into_iter().map(openlibrary_book_to_result).collect();
+    let results: Vec<RsLookupMetadataResultWrapper> = all_books
+        .into_iter()
+        .map(openlibrary_book_to_result)
+        .collect();
 
     Ok(Json(results))
 }
@@ -334,7 +340,10 @@ mod tests {
 
     #[test]
     fn normalize_exact_isbn_search_rejects_non_exact_values() {
-        assert_eq!(normalize_exact_isbn_search("The Hobbit 9780140328721"), None);
+        assert_eq!(
+            normalize_exact_isbn_search("The Hobbit 9780140328721"),
+            None
+        );
         assert_eq!(normalize_exact_isbn_search("isbn 9780140328721"), None);
         assert_eq!(normalize_exact_isbn_search(""), None);
     }

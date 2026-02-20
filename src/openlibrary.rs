@@ -23,6 +23,8 @@ pub struct OpenLibrarySearchDoc {
     #[serde(default)]
     pub author_name: Vec<String>,
     #[serde(default)]
+    pub author_key: Vec<String>,
+    #[serde(default)]
     pub subject: Vec<String>,
     #[serde(default)]
     pub publisher: Vec<String>,
@@ -118,6 +120,7 @@ pub struct OpenLibraryBookRecord {
     pub pages: Option<u32>,
     pub language: Option<String>,
     pub authors: Vec<String>,
+    pub author_keys: Vec<String>,
     pub subjects: Vec<String>,
     pub publishers: Vec<String>,
 }
@@ -266,13 +269,18 @@ pub fn book_record_from_search_doc(doc: &OpenLibrarySearchDoc) -> Option<OpenLib
         edition_id,
         work_id,
         isbn13: first_isbn13(&doc.isbn),
-        cover_ids: doc.cover_i.and_then(positive_cover_id).into_iter().collect(),
+        cover_ids: doc
+            .cover_i
+            .and_then(positive_cover_id)
+            .into_iter()
+            .collect(),
         cover_id: doc.cover_i.and_then(positive_cover_id),
         publish_year: doc.first_publish_year,
         description: None,
         pages: doc.number_of_pages_median.and_then(positive_u32),
         language: doc.language.first().cloned(),
         authors: doc.author_name.clone(),
+        author_keys: doc.author_key.clone(),
         subjects: doc.subject.clone(),
         publishers: doc.publisher.clone(),
     })
@@ -311,6 +319,7 @@ pub fn book_record_from_edition_response(
             .first()
             .and_then(|language| language_from_key(&language.key)),
         authors: vec![],
+        author_keys: vec![],
         subjects: vec![],
         publishers: response.publishers.clone(),
     }
@@ -337,6 +346,7 @@ pub fn book_record_from_work_response(response: &OpenLibraryWorkResponse) -> Ope
         pages: None,
         language: None,
         authors: vec![],
+        author_keys: vec![],
         subjects: response.subjects.clone(),
         publishers: vec![],
     }
@@ -379,7 +389,11 @@ pub fn merge_work_with_edition(
         edition_id: edition.edition_id.or(work.edition_id),
         work_id: work.work_id.or(edition.work_id),
         isbn13: edition.isbn13.or(work.isbn13),
-        cover_id: cover_ids.first().copied().or(edition.cover_id).or(work.cover_id),
+        cover_id: cover_ids
+            .first()
+            .copied()
+            .or(edition.cover_id)
+            .or(work.cover_id),
         cover_ids,
         publish_year: edition.publish_year.or(work.publish_year),
         description: work.description.or(edition.description),
@@ -389,6 +403,11 @@ pub fn merge_work_with_edition(
             edition.authors
         } else {
             work.authors
+        },
+        author_keys: if work.author_keys.is_empty() {
+            edition.author_keys
+        } else {
+            work.author_keys
         },
         subjects: if work.subjects.is_empty() {
             edition.subjects
@@ -433,6 +452,28 @@ mod tests {
     fn first_isbn13_prefers_normalized_13_digit() {
         let values = vec!["978-0-14-032872-1".to_string(), "0140328726".to_string()];
         assert_eq!(first_isbn13(&values), Some("9780140328721".to_string()));
+    }
+
+    #[test]
+    fn search_doc_maps_author_keys() {
+        let doc = OpenLibrarySearchDoc {
+            key: "/works/OL45804W".to_string(),
+            title: "The Hobbit".to_string(),
+            edition_key: vec!["OL7353617M".to_string()],
+            isbn: vec!["9780140328721".to_string()],
+            cover_i: None,
+            first_publish_year: Some(1937),
+            language: vec!["eng".to_string()],
+            author_name: vec!["J.R.R. Tolkien".to_string()],
+            author_key: vec!["OL26320A".to_string()],
+            subject: vec!["Fantasy".to_string()],
+            publisher: vec!["Allen & Unwin".to_string()],
+            number_of_pages_median: None,
+        };
+
+        let record = book_record_from_search_doc(&doc).expect("Expected mapped record");
+        assert_eq!(record.authors, vec!["J.R.R. Tolkien".to_string()]);
+        assert_eq!(record.author_keys, vec!["OL26320A".to_string()]);
     }
 
     #[test]

@@ -2,9 +2,13 @@ use rs_plugin_common_interfaces::{
     domain::{
         book::Book,
         external_images::{ExternalImage, ImageType},
+        other_ids::OtherIds,
+        person::Person,
         rs_ids::RsIds,
+        tag::Tag,
+        Relations,
     },
-    lookup::{RsLookupMetadataResult, RsLookupMetadataResultWithImages},
+    lookup::{RsLookupMetadataResult, RsLookupMetadataResultWrapper},
     RsRequest,
 };
 use serde_json::json;
@@ -45,6 +49,52 @@ fn fallback_local_id(title: &str) -> String {
         "openlibrary-title".to_string()
     } else {
         format!("openlibrary-title-{slug}")
+    }
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    let mut previous_was_dash = false;
+
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            previous_was_dash = false;
+        } else if !previous_was_dash {
+            slug.push('-');
+            previous_was_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    if slug.starts_with('-') {
+        slug.remove(0);
+    }
+
+    if slug.is_empty() {
+        "unknown".to_string()
+    } else {
+        slug
+    }
+}
+
+fn relation_key(value: &str) -> String {
+    let trimmed = value.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return "unknown".to_string();
+    }
+
+    let candidate = trimmed.rsplit('/').next().unwrap_or(trimmed).trim();
+    if candidate
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        candidate.to_ascii_lowercase()
+    } else {
+        slugify(candidate)
     }
 }
 
@@ -100,6 +150,103 @@ fn build_images(record: &OpenLibraryBookRecord) -> Vec<ExternalImage> {
     }
 }
 
+fn build_people_details(record: &OpenLibraryBookRecord) -> Option<Vec<Person>> {
+    let mut people: Vec<Person> = Vec::new();
+    let mut seen_ids: Vec<String> = Vec::new();
+
+    for (index, name) in record.authors.iter().enumerate() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let person_key = record
+            .author_keys
+            .get(index)
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+            .map(relation_key);
+
+        let base_key = slugify(name);
+        let relation_key = person_key
+            .as_ref()
+            .map(|key| format!("{base_key}-{key}"))
+            .unwrap_or(base_key);
+        let other_id = format!("openlib-person:{relation_key}");
+
+        if seen_ids.contains(&other_id) {
+            continue;
+        }
+        seen_ids.push(other_id.clone());
+
+        let mut params = serde_json::Map::new();
+        if let Some(author_key) = person_key {
+            params.insert("openlibraryAuthorId".to_string(), json!(author_key));
+        }
+
+        people.push(Person {
+            id: other_id.clone(),
+            name: name.to_string(),
+            kind: Some("author".to_string()),
+            params: if params.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(params))
+            },
+            generated: true,
+            otherids: Some(OtherIds(vec![other_id])),
+            ..Default::default()
+        });
+    }
+
+    if people.is_empty() {
+        None
+    } else {
+        Some(people)
+    }
+}
+
+fn build_tags_details(record: &OpenLibraryBookRecord) -> Option<Vec<Tag>> {
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut seen_ids: Vec<String> = Vec::new();
+
+    for value in &record.subjects {
+        let name = value.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let key = relation_key(name);
+        let other_id = format!("openlib-tag:{key}");
+
+        if seen_ids.contains(&other_id) {
+            continue;
+        }
+        seen_ids.push(other_id.clone());
+
+        tags.push(Tag {
+            id: other_id.clone(),
+            name: name.to_string(),
+            parent: None,
+            kind: Some("subject".to_string()),
+            alt: None,
+            thumb: None,
+            params: Some(json!({ "openlibraryTagKey": key })),
+            modified: 0,
+            added: 0,
+            generated: true,
+            path: "/".to_string(),
+            otherids: Some(OtherIds(vec![other_id])),
+        });
+    }
+
+    if tags.is_empty() {
+        None
+    } else {
+        Some(tags)
+    }
+}
+
 fn build_params(record: &OpenLibraryBookRecord) -> serde_json::Value {
     let mut params = serde_json::Map::new();
 
@@ -122,10 +269,26 @@ fn build_params(record: &OpenLibraryBookRecord) -> serde_json::Value {
     serde_json::Value::Object(params)
 }
 
-pub fn openlibrary_book_to_result(
-    record: OpenLibraryBookRecord,
-) -> RsLookupMetadataResultWithImages {
+pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord) -> RsLookupMetadataResultWrapper {
     let images = build_images(&record);
+    let ext_images = if images.is_empty() {
+        None
+    } else {
+        Some(images)
+    };
+    let people_details = build_people_details(&record);
+    let tags_details = build_tags_details(&record);
+
+    let relations = if ext_images.is_some() || people_details.is_some() || tags_details.is_some() {
+        Some(Relations {
+            people_details,
+            tags_details,
+            ext_images,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
     let params = build_params(&record);
 
     let book = Book {
@@ -150,10 +313,9 @@ pub fn openlibrary_book_to_result(
         ..Default::default()
     };
 
-    RsLookupMetadataResultWithImages {
+    RsLookupMetadataResultWrapper {
         metadata: RsLookupMetadataResult::Book(book),
-        images,
-        ..Default::default()
+        relations,
     }
 }
 
@@ -275,5 +437,50 @@ mod tests {
         } else {
             panic!("Expected Book metadata");
         }
+    }
+
+    #[test]
+    fn includes_images_people_and_tags_in_relations_details_only() {
+        let record = OpenLibraryBookRecord {
+            title: "The Hobbit".to_string(),
+            cover_ids: vec![12345],
+            authors: vec!["J.R.R. Tolkien".to_string()],
+            author_keys: vec!["OL26320A".to_string()],
+            subjects: vec!["Fantasy".to_string()],
+            ..Default::default()
+        };
+
+        let result = openlibrary_book_to_result(record);
+        let relations = result.relations.expect("Expected relations");
+
+        let images = relations.ext_images.expect("Expected ext_images");
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            images[0].url.url,
+            "https://covers.openlibrary.org/b/id/12345-L.jpg"
+        );
+
+        let people = relations.people_details.expect("Expected people_details");
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].id, "openlib-person:j-r-r-tolkien-ol26320a");
+        assert_eq!(people[0].name, "J.R.R. Tolkien");
+        assert_eq!(
+            people[0].otherids,
+            Some(OtherIds(vec![
+                "openlib-person:j-r-r-tolkien-ol26320a".to_string()
+            ]))
+        );
+
+        let tags = relations.tags_details.expect("Expected tags_details");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, "openlib-tag:fantasy");
+        assert_eq!(tags[0].name, "Fantasy");
+        assert_eq!(
+            tags[0].otherids,
+            Some(OtherIds(vec!["openlib-tag:fantasy".to_string()]))
+        );
+
+        assert!(relations.people.is_none());
+        assert!(relations.tags.is_none());
     }
 }

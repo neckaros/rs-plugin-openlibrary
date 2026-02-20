@@ -251,7 +251,7 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
 
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
-            name: None,
+            name: Some("Full moon".to_string()),
             ids: Some(RsIds {
                 isbn13: Some("9783734163364".to_string()),
                 openlibrary_edition_id: Some("OL50550144M".to_string()),
