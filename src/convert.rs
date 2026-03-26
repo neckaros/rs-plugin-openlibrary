@@ -8,7 +8,7 @@ use rs_plugin_common_interfaces::{
         tag::Tag,
         Relations,
     },
-    lookup::{RsLookupMetadataResult, RsLookupMetadataResultWrapper},
+    lookup::{RsLookupMatchType, RsLookupMetadataResult, RsLookupMetadataResultWrapper},
     RsRequest,
 };
 use serde_json::json;
@@ -18,16 +18,20 @@ use crate::openlibrary::{
 };
 
 fn canonical_rs_id(record: &OpenLibraryBookRecord) -> Option<String> {
-    let ids = RsIds {
-        isbn13: record.isbn13.clone(),
-        openlibrary_edition_id: record.edition_id.clone(),
-        openlibrary_work_id: record.work_id.clone(),
-        ..Default::default()
-    };
+    let mut ids = RsIds::default();
+    if let Some(isbn) = &record.isbn13 {
+        ids.set("isbn13", isbn);
+    }
+    if let Some(edition) = &record.edition_id {
+        ids.set("openlibrary_edition_id", edition);
+    }
+    if let Some(work) = &record.work_id {
+        ids.set("openlibrary_work_id", work);
+    }
 
-    ids.as_isbn13()
-        .or(ids.as_openlibrary_edition_id())
-        .or(ids.as_openlibrary_work_id())
+    ids.as_string("isbn13")
+        .or(ids.as_string("oleid"))
+        .or(ids.as_string("olwid"))
 }
 
 fn fallback_local_id(title: &str) -> String {
@@ -269,7 +273,7 @@ fn build_params(record: &OpenLibraryBookRecord) -> serde_json::Value {
     serde_json::Value::Object(params)
 }
 
-pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord) -> RsLookupMetadataResultWrapper {
+pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord, match_type: Option<RsLookupMatchType>) -> RsLookupMetadataResultWrapper {
     let images = build_images(&record);
     let ext_images = if images.is_empty() {
         None
@@ -316,6 +320,7 @@ pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord) -> RsLookupMeta
     RsLookupMetadataResultWrapper {
         metadata: RsLookupMetadataResult::Book(book),
         relations,
+        match_type,
     }
 }
 

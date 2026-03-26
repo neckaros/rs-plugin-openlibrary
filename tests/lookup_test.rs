@@ -55,9 +55,10 @@ fn test_lookup_by_isbn13() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                isbn13: Some("9780140328721".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("isbn13", "9780140328721");
+                ids
             }),
         }),
         credential: None,
@@ -80,9 +81,10 @@ fn test_lookup_by_openlibrary_edition_id() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                openlibrary_edition_id: Some("OL7353617M".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_edition_id", "OL7353617M");
+                ids
             }),
         }),
         credential: None,
@@ -105,9 +107,10 @@ fn test_lookup_by_openlibrary_work_id() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                openlibrary_work_id: Some("OL45804W".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_work_id", "OL45804W");
+                ids
             }),
         }),
         credential: None,
@@ -154,9 +157,10 @@ fn test_lookup_images_by_openlibrary_edition_id() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                openlibrary_edition_id: Some("OL7353617M".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_edition_id", "OL7353617M");
+                ids
             }),
         }),
         credential: None,
@@ -178,9 +182,10 @@ fn test_lookup_images_by_openlibrary_work_id() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                openlibrary_work_id: Some("OL11967339W".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_work_id", "OL11967339W");
+                ids
             }),
         }),
         credential: None,
@@ -203,9 +208,10 @@ fn test_lookup_images_by_openlibrary_work_id_with_multiple_covers() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                openlibrary_work_id: Some("OL5961788W".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_work_id", "OL5961788W");
+                ids
             }),
         }),
         credential: None,
@@ -227,9 +233,10 @@ fn test_lookup_images_by_isbn13_id() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                isbn13: Some("9780143143390".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("isbn13", "9780143143390");
+                ids
             }),
         }),
         credential: None,
@@ -252,11 +259,12 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
     let input = RsLookupWrapper {
         query: RsLookupQuery::Book(RsLookupBook {
             name: Some("Full moon".to_string()),
-            ids: Some(RsIds {
-                isbn13: Some("9783734163364".to_string()),
-                openlibrary_edition_id: Some("OL50550144M".to_string()),
-                openlibrary_work_id: Some("OL5961788W".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("isbn13", "9783734163364");
+                ids.set("openlibrary_edition_id", "OL50550144M");
+                ids.set("openlibrary_work_id", "OL5961788W");
+                ids
             }),
         }),
         credential: None,

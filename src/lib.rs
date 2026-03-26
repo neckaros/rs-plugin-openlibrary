@@ -3,7 +3,7 @@ use std::collections::HashSet;
 
 use rs_plugin_common_interfaces::{
     domain::external_images::ExternalImage,
-    lookup::{RsLookupMetadataResultWrapper, RsLookupQuery, RsLookupWrapper},
+    lookup::{RsLookupMatchType, RsLookupMetadataResultWrapper, RsLookupMetadataResults, RsLookupQuery, RsLookupWrapper},
     PluginInformation, PluginType,
 };
 
@@ -25,7 +25,7 @@ pub fn infos() -> FnResult<Json<PluginInformation>> {
     Ok(Json(PluginInformation {
         name: "openlibrary_metadata".into(),
         capabilities: vec![PluginType::LookupMetadata],
-        version: 4,
+        version: 6,
         interface_version: 1,
         repo: Some("https://github.com/neckaros/rs-plugin-openlibrary".into()),
         publisher: "neckaros".into(),
@@ -49,13 +49,13 @@ fn extract_book_ids(query: &RsLookupQuery) -> Option<BookIds> {
             let ids = book.ids.as_ref();
             Some(BookIds {
                 isbn13: ids
-                    .and_then(|ids| ids.isbn13.as_ref())
+                    .and_then(|ids| ids.isbn13())
                     .and_then(|value| normalize_isbn13(value)),
                 edition_id: ids
-                    .and_then(|ids| ids.openlibrary_edition_id.as_ref())
+                    .and_then(|ids| ids.openlibrary_edition_id())
                     .and_then(|value| normalize_openlibrary_id(value, "books")),
                 work_id: ids
-                    .and_then(|ids| ids.openlibrary_work_id.as_ref())
+                    .and_then(|ids| ids.openlibrary_work_id())
                     .and_then(|value| normalize_openlibrary_id(value, "works")),
             })
         }
@@ -194,9 +194,9 @@ fn deduplicate_images(images: Vec<ExternalImage>) -> Vec<ExternalImage> {
     deduped
 }
 
-fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBookRecord>> {
+fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<(Vec<OpenLibraryBookRecord>, Option<RsLookupMatchType>)> {
     let Some(mut ids) = extract_book_ids(&lookup.query) else {
-        return Ok(vec![]);
+        return Ok((vec![], None));
     };
 
     if ids.isbn13.is_none() {
@@ -207,12 +207,12 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBook
         }
     }
 
-    let records = if let Some(isbn13) = ids.isbn13 {
-        fetch_by_isbn(&isbn13)?
+    let (records, match_type) = if let Some(isbn13) = ids.isbn13 {
+        (fetch_by_isbn(&isbn13)?, Some(RsLookupMatchType::ExactId))
     } else if let Some(edition_id) = ids.edition_id {
-        fetch_by_edition(&edition_id)?
+        (fetch_by_edition(&edition_id)?, Some(RsLookupMatchType::ExactId))
     } else if let Some(work_id) = ids.work_id {
-        fetch_by_work(&work_id)?
+        (fetch_by_work(&work_id)?, Some(RsLookupMatchType::ExactId))
     } else {
         let search = match &lookup.query {
             RsLookupQuery::Book(book) => book.name.as_deref(),
@@ -220,7 +220,7 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBook
         };
 
         match search {
-            Some(name) if !name.trim().is_empty() => fetch_by_search(name)?,
+            Some(name) if !name.trim().is_empty() => (fetch_by_search(name)?, Some(RsLookupMatchType::ExactText)),
             _ => {
                 return Err(WithReturnCode::new(
                     extism_pdk::Error::msg("Not supported"),
@@ -230,14 +230,14 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<Vec<OpenLibraryBook
         }
     };
 
-    Ok(deduplicate_records(records))
+    Ok((deduplicate_records(records), match_type))
 }
 
 fn lookup_book_records_for_images(
     lookup: &RsLookupWrapper,
-) -> FnResult<Vec<OpenLibraryBookRecord>> {
+) -> FnResult<(Vec<OpenLibraryBookRecord>, Option<RsLookupMatchType>)> {
     let Some(mut ids) = extract_book_ids(&lookup.query) else {
-        return Ok(vec![]);
+        return Ok((vec![], None));
     };
 
     if ids.isbn13.is_none() {
@@ -261,7 +261,7 @@ fn lookup_book_records_for_images(
             records.extend(fetch_by_work(work_id)?);
         }
 
-        return Ok(records);
+        return Ok((records, Some(RsLookupMatchType::ExactId)));
     }
 
     lookup_book_records(lookup)
@@ -270,27 +270,31 @@ fn lookup_book_records_for_images(
 #[plugin_fn]
 pub fn lookup_metadata(
     Json(lookup): Json<RsLookupWrapper>,
-) -> FnResult<Json<Vec<RsLookupMetadataResultWrapper>>> {
-    let all_books = lookup_book_records(&lookup)?;
+) -> FnResult<Json<RsLookupMetadataResults>> {
+    let (all_books, match_type) = lookup_book_records(&lookup)?;
 
     let results: Vec<RsLookupMetadataResultWrapper> = all_books
         .into_iter()
-        .map(openlibrary_book_to_result)
+        .map(|book| openlibrary_book_to_result(book, match_type.clone()))
         .collect();
 
-    Ok(Json(results))
+    Ok(Json(RsLookupMetadataResults { results, next_page_key: None }))
 }
 
 #[plugin_fn]
 pub fn lookup_metadata_images(
     Json(lookup): Json<RsLookupWrapper>,
 ) -> FnResult<Json<Vec<ExternalImage>>> {
-    let all_books = lookup_book_records_for_images(&lookup)?;
+    let (all_books, match_type) = lookup_book_records_for_images(&lookup)?;
 
-    let images: Vec<ExternalImage> = all_books
+    let mut images: Vec<ExternalImage> = all_books
         .into_iter()
         .flat_map(|book| openlibrary_book_to_images(&book))
         .collect();
+
+    for img in &mut images {
+        img.match_type = match_type.clone();
+    }
 
     Ok(Json(deduplicate_images(images)))
 }
@@ -304,11 +308,12 @@ mod tests {
     fn book_query_extracts_ids() {
         let query = RsLookupQuery::Book(RsLookupBook {
             name: None,
-            ids: Some(RsIds {
-                isbn13: Some("9780140328721".to_string()),
-                openlibrary_edition_id: Some("/books/OL7353617M".to_string()),
-                openlibrary_work_id: Some("works/OL45804W".to_string()),
-                ..Default::default()
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("isbn13", "9780140328721");
+                ids.set("openlibrary_edition_id", "/books/OL7353617M");
+                ids.set("openlibrary_work_id", "works/OL45804W");
+                ids
             }),
         });
 
