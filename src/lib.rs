@@ -29,7 +29,7 @@ pub fn infos() -> FnResult<Json<PluginInformation>> {
     Ok(Json(PluginInformation {
         name: "openlibrary_metadata".into(),
         capabilities: vec![PluginType::LookupMetadata],
-        version: 6,
+        version: 7,
         interface_version: 1,
         repo: Some("https://github.com/neckaros/rs-plugin-openlibrary".into()),
         publisher: "neckaros".into(),
