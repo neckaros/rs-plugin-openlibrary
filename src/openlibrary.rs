@@ -503,6 +503,16 @@ pub fn merge_work_with_edition(
     }
 }
 
+pub fn merge_work_series_into_edition(
+    mut edition: OpenLibraryBookRecord,
+    work: OpenLibraryBookRecord,
+) -> OpenLibraryBookRecord {
+    if !work.series.is_empty() {
+        edition.series = work.series;
+    }
+    edition
+}
+
 fn non_empty_string(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -735,6 +745,39 @@ mod tests {
         assert_eq!(merged.cover_id, Some(2701529));
         assert_eq!(merged.series.len(), 1);
         assert_eq!(merged.series[0].position.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn series_enrichment_preserves_edition_metadata() {
+        let edition = OpenLibraryBookRecord {
+            title: "La Communauté de l'anneau".to_string(),
+            description: Some("French edition description".to_string()),
+            pages: Some(544),
+            edition_id: Some("OL123M".to_string()),
+            ..Default::default()
+        };
+        let work = OpenLibraryBookRecord {
+            title: "The Fellowship of the Ring".to_string(),
+            description: Some("Generic work description".to_string()),
+            pages: Some(423),
+            series: vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let enriched = merge_work_series_into_edition(edition, work);
+        assert_eq!(enriched.title, "La Communauté de l'anneau");
+        assert_eq!(
+            enriched.description.as_deref(),
+            Some("French edition description")
+        );
+        assert_eq!(enriched.pages, Some(544));
+        assert_eq!(enriched.edition_id.as_deref(), Some("OL123M"));
+        assert_eq!(enriched.series.len(), 1);
+        assert_eq!(enriched.series[0].position.as_deref(), Some("1"));
     }
 }
 fn positive_cover_id(value: i64) -> Option<u64> {

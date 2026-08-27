@@ -17,10 +17,10 @@ use convert::{openlibrary_book_to_images, openlibrary_book_to_result};
 use openlibrary::{
     book_record_from_edition_response, book_record_from_search_doc, book_record_from_work_response,
     build_edition_url, build_isbn_url, build_search_url, build_series_url, build_work_editions_url,
-    build_work_url, first_record_from_work_editions, merge_work_with_edition, normalize_isbn13,
-    normalize_openlibrary_id, OpenLibraryBookRecord, OpenLibraryEditionResponse,
-    OpenLibrarySearchResponse, OpenLibrarySeriesResponse, OpenLibraryWorkEditionsResponse,
-    OpenLibraryWorkResponse,
+    build_work_url, first_record_from_work_editions, merge_work_series_into_edition,
+    merge_work_with_edition, normalize_isbn13, normalize_openlibrary_id, OpenLibraryBookRecord,
+    OpenLibraryEditionResponse, OpenLibrarySearchResponse, OpenLibrarySeriesResponse,
+    OpenLibraryWorkEditionsResponse, OpenLibraryWorkResponse,
 };
 use serde::de::DeserializeOwned;
 
@@ -171,7 +171,7 @@ fn book_record_with_optional_work(
 
     let mut work_record = book_record_from_work_response(&work);
     enrich_series_names(&mut work_record);
-    merge_work_with_edition(work_record, Some(edition_record))
+    merge_work_series_into_edition(edition_record, work_record)
 }
 
 fn enrich_series_names(record: &mut OpenLibraryBookRecord) {
