@@ -1,7 +1,10 @@
 use extism::*;
 use rs_plugin_common_interfaces::{
     domain::rs_ids::RsIds,
-    lookup::{RsLookupBook, RsLookupQuery, RsLookupWrapper},
+    lookup::{
+        RsLookupBook, RsLookupMetadataResult, RsLookupMetadataResults, RsLookupQuery,
+        RsLookupWrapper,
+    },
 };
 use std::collections::HashSet;
 
@@ -11,12 +14,12 @@ fn build_plugin() -> Plugin {
     Plugin::new(&manifest, [], true).expect("Failed to create plugin")
 }
 
-fn call_lookup(plugin: &mut Plugin, input: &RsLookupWrapper) -> serde_json::Value {
+fn call_lookup(plugin: &mut Plugin, input: &RsLookupWrapper) -> RsLookupMetadataResults {
     let input_str = serde_json::to_string(input).unwrap();
     let output = plugin
         .call::<&str, &[u8]>("lookup_metadata", &input_str)
         .expect("lookup_metadata call failed");
-    serde_json::from_slice(output).expect("Failed to parse output JSON")
+    serde_json::from_slice(output).expect("Failed to parse metadata results")
 }
 
 fn call_lookup_images(plugin: &mut Plugin, input: &RsLookupWrapper) -> serde_json::Value {
@@ -35,15 +38,15 @@ fn test_lookup_the_hobbit_by_name() {
         query: RsLookupQuery::Book(RsLookupBook {
             name: Some("The Hobbit".to_string()),
             ids: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,
     };
 
     let results = call_lookup(&mut plugin, &input);
-    let results_array = results.as_array().expect("Expected an array");
     assert!(
-        !results_array.is_empty(),
+        !results.results.is_empty(),
         "Expected at least one result for 'The Hobbit'"
     );
 }
@@ -60,15 +63,15 @@ fn test_lookup_by_isbn13() {
                 ids.set("isbn13", "9780140328721");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
     };
 
     let results = call_lookup(&mut plugin, &input);
-    let results_array = results.as_array().expect("Expected an array");
     assert_eq!(
-        results_array.len(),
+        results.results.len(),
         1,
         "Expected exactly one result when fetching by ISBN13"
     );
@@ -86,15 +89,15 @@ fn test_lookup_by_openlibrary_edition_id() {
                 ids.set("openlibrary_edition_id", "OL7353617M");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
     };
 
     let results = call_lookup(&mut plugin, &input);
-    let results_array = results.as_array().expect("Expected an array");
     assert_eq!(
-        results_array.len(),
+        results.results.len(),
         1,
         "Expected exactly one result when fetching by edition ID"
     );
@@ -112,15 +115,15 @@ fn test_lookup_by_openlibrary_work_id() {
                 ids.set("openlibrary_work_id", "OL45804W");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
     };
 
     let results = call_lookup(&mut plugin, &input);
-    let results_array = results.as_array().expect("Expected an array");
     assert_eq!(
-        results_array.len(),
+        results.results.len(),
         1,
         "Expected exactly one result when fetching by work ID"
     );
@@ -134,6 +137,7 @@ fn test_lookup_empty_name_returns_404() {
         query: RsLookupQuery::Book(RsLookupBook {
             name: Some("".to_string()),
             ids: None,
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -162,6 +166,7 @@ fn test_lookup_images_by_openlibrary_edition_id() {
                 ids.set("openlibrary_edition_id", "OL7353617M");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -187,6 +192,7 @@ fn test_lookup_images_by_openlibrary_work_id() {
                 ids.set("openlibrary_work_id", "OL11967339W");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -213,6 +219,7 @@ fn test_lookup_images_by_openlibrary_work_id_with_multiple_covers() {
                 ids.set("openlibrary_work_id", "OL5961788W");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -238,6 +245,7 @@ fn test_lookup_images_by_isbn13_id() {
                 ids.set("isbn13", "9780143143390");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -266,6 +274,7 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
                 ids.set("openlibrary_work_id", "OL5961788W");
                 ids
             }),
+            ..Default::default()
         }),
         credential: None,
         params: None,
@@ -292,5 +301,48 @@ fn test_lookup_images_by_multiple_ids_is_deduplicated() {
         urls.len(),
         unique_count,
         "Expected deduplicated image URLs when multiple IDs are provided"
+    );
+}
+
+#[test]
+fn test_lookup_work_exposes_series_and_position() {
+    let mut plugin = build_plugin();
+
+    let input = RsLookupWrapper {
+        query: RsLookupQuery::Book(RsLookupBook {
+            name: None,
+            ids: Some({
+                let mut ids = RsIds::default();
+                ids.set("openlibrary_work_id", "OL27513W");
+                ids
+            }),
+            ..Default::default()
+        }),
+        credential: None,
+        params: None,
+    };
+
+    let results = call_lookup(&mut plugin, &input);
+    let result = results.results.first().expect("Expected one result");
+    let book = match &result.metadata {
+        RsLookupMetadataResult::Book(book) => book,
+        _ => panic!("Expected book metadata"),
+    };
+
+    assert_eq!(book.volume, Some(1.0));
+    let relations = result.relations.as_ref().expect("Expected relations");
+    let series = relations
+        .series_details
+        .as_ref()
+        .and_then(|series| series.first())
+        .expect("Expected series details");
+    assert_eq!(series.name, "The Lord of the Rings");
+    assert_eq!(
+        relations
+            .series
+            .as_ref()
+            .and_then(|series| series.first())
+            .and_then(|series| series.season),
+        Some(1)
     );
 }

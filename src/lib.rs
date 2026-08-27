@@ -3,7 +3,10 @@ use std::collections::HashSet;
 
 use rs_plugin_common_interfaces::{
     domain::external_images::ExternalImage,
-    lookup::{RsLookupMatchType, RsLookupMetadataResultWrapper, RsLookupMetadataResults, RsLookupQuery, RsLookupWrapper},
+    lookup::{
+        RsLookupMatchType, RsLookupMetadataResultWrapper, RsLookupMetadataResults, RsLookupQuery,
+        RsLookupWrapper,
+    },
     PluginInformation, PluginType,
 };
 
@@ -13,10 +16,11 @@ mod openlibrary;
 use convert::{openlibrary_book_to_images, openlibrary_book_to_result};
 use openlibrary::{
     book_record_from_edition_response, book_record_from_search_doc, book_record_from_work_response,
-    build_edition_url, build_isbn_url, build_search_url, build_work_editions_url, build_work_url,
-    first_record_from_work_editions, merge_work_with_edition, normalize_isbn13,
-    normalize_openlibrary_id, OpenLibraryBookRecord, OpenLibraryEditionResponse,
-    OpenLibrarySearchResponse, OpenLibraryWorkEditionsResponse, OpenLibraryWorkResponse,
+    build_edition_url, build_isbn_url, build_search_url, build_series_url, build_work_editions_url,
+    build_work_url, first_record_from_work_editions, merge_work_series_into_edition,
+    merge_work_with_edition, normalize_isbn13, normalize_openlibrary_id, OpenLibraryBookRecord,
+    OpenLibraryEditionResponse, OpenLibrarySearchResponse, OpenLibrarySeriesResponse,
+    OpenLibraryWorkEditionsResponse, OpenLibraryWorkResponse,
 };
 use serde::de::DeserializeOwned;
 
@@ -25,7 +29,7 @@ pub fn infos() -> FnResult<Json<PluginInformation>> {
     Ok(Json(PluginInformation {
         name: "openlibrary_metadata".into(),
         capabilities: vec![PluginType::LookupMetadata],
-        version: 6,
+        version: 7,
         interface_version: 1,
         repo: Some("https://github.com/neckaros/rs-plugin-openlibrary".into()),
         publisher: "neckaros".into(),
@@ -108,24 +112,92 @@ fn execute_get<T: DeserializeOwned>(url: String) -> FnResult<T> {
     }
 }
 
-fn fetch_by_isbn(isbn13: &str) -> FnResult<Vec<OpenLibraryBookRecord>> {
+fn fetch_by_isbn(isbn13: &str, include_series: bool) -> FnResult<Vec<OpenLibraryBookRecord>> {
     let edition: OpenLibraryEditionResponse = execute_get(build_isbn_url(isbn13))?;
-    Ok(vec![book_record_from_edition_response(&edition)])
+    Ok(vec![book_record_with_optional_work(
+        edition,
+        include_series,
+    )])
 }
 
-fn fetch_by_edition(edition_id: &str) -> FnResult<Vec<OpenLibraryBookRecord>> {
+fn fetch_by_edition(
+    edition_id: &str,
+    include_series: bool,
+) -> FnResult<Vec<OpenLibraryBookRecord>> {
     let edition: OpenLibraryEditionResponse = execute_get(build_edition_url(edition_id))?;
-    Ok(vec![book_record_from_edition_response(&edition)])
+    Ok(vec![book_record_with_optional_work(
+        edition,
+        include_series,
+    )])
 }
 
-fn fetch_by_work(work_id: &str) -> FnResult<Vec<OpenLibraryBookRecord>> {
+fn fetch_by_work(work_id: &str, include_series: bool) -> FnResult<Vec<OpenLibraryBookRecord>> {
     let work: OpenLibraryWorkResponse = execute_get(build_work_url(work_id))?;
     let editions: OpenLibraryWorkEditionsResponse = execute_get(build_work_editions_url(work_id))?;
-    let merged = merge_work_with_edition(
-        book_record_from_work_response(&work),
-        first_record_from_work_editions(&editions),
-    );
+    let mut work_record = book_record_from_work_response(&work);
+    if include_series {
+        enrich_series_names(&mut work_record);
+    } else {
+        work_record.series.clear();
+    }
+    let merged = merge_work_with_edition(work_record, first_record_from_work_editions(&editions));
     Ok(vec![merged])
+}
+
+fn book_record_with_optional_work(
+    edition: OpenLibraryEditionResponse,
+    include_series: bool,
+) -> OpenLibraryBookRecord {
+    let edition_record = book_record_from_edition_response(&edition);
+    if !include_series {
+        return edition_record;
+    }
+    let Some(work_id) = edition_record.work_id.clone() else {
+        return edition_record;
+    };
+
+    let work = match execute_get::<OpenLibraryWorkResponse>(build_work_url(&work_id)) {
+        Ok(work) => work,
+        Err(error) => {
+            log!(
+                LogLevel::Warn,
+                "Unable to enrich OpenLibrary edition with work {}: {:?}",
+                work_id,
+                error
+            );
+            return edition_record;
+        }
+    };
+
+    let mut work_record = book_record_from_work_response(&work);
+    enrich_series_names(&mut work_record);
+    merge_work_series_into_edition(edition_record, work_record)
+}
+
+fn enrich_series_names(record: &mut OpenLibraryBookRecord) {
+    for series in &mut record.series {
+        if series.name.is_some() {
+            continue;
+        }
+        let Some(series_id) = series.id.as_deref() else {
+            continue;
+        };
+
+        match execute_get::<OpenLibrarySeriesResponse>(build_series_url(series_id)) {
+            Ok(response) => {
+                let name = response.name.trim();
+                if !name.is_empty() {
+                    series.name = Some(name.to_string());
+                }
+            }
+            Err(error) => log!(
+                LogLevel::Warn,
+                "Unable to enrich OpenLibrary series {}: {:?}",
+                series_id,
+                error
+            ),
+        }
+    }
 }
 
 fn fetch_by_search(search: &str) -> FnResult<Vec<OpenLibraryBookRecord>> {
@@ -194,7 +266,9 @@ fn deduplicate_images(images: Vec<ExternalImage>) -> Vec<ExternalImage> {
     deduped
 }
 
-fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<(Vec<OpenLibraryBookRecord>, Option<RsLookupMatchType>)> {
+fn lookup_book_records(
+    lookup: &RsLookupWrapper,
+) -> FnResult<(Vec<OpenLibraryBookRecord>, Option<RsLookupMatchType>)> {
     let Some(mut ids) = extract_book_ids(&lookup.query) else {
         return Ok((vec![], None));
     };
@@ -208,11 +282,20 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<(Vec<OpenLibraryBoo
     }
 
     let (records, match_type) = if let Some(isbn13) = ids.isbn13 {
-        (fetch_by_isbn(&isbn13)?, Some(RsLookupMatchType::ExactId))
+        (
+            fetch_by_isbn(&isbn13, true)?,
+            Some(RsLookupMatchType::ExactId),
+        )
     } else if let Some(edition_id) = ids.edition_id {
-        (fetch_by_edition(&edition_id)?, Some(RsLookupMatchType::ExactId))
+        (
+            fetch_by_edition(&edition_id, true)?,
+            Some(RsLookupMatchType::ExactId),
+        )
     } else if let Some(work_id) = ids.work_id {
-        (fetch_by_work(&work_id)?, Some(RsLookupMatchType::ExactId))
+        (
+            fetch_by_work(&work_id, true)?,
+            Some(RsLookupMatchType::ExactId),
+        )
     } else {
         let search = match &lookup.query {
             RsLookupQuery::Book(book) => book.name.as_deref(),
@@ -220,7 +303,9 @@ fn lookup_book_records(lookup: &RsLookupWrapper) -> FnResult<(Vec<OpenLibraryBoo
         };
 
         match search {
-            Some(name) if !name.trim().is_empty() => (fetch_by_search(name)?, Some(RsLookupMatchType::ExactText)),
+            Some(name) if !name.trim().is_empty() => {
+                (fetch_by_search(name)?, Some(RsLookupMatchType::ExactText))
+            }
             _ => {
                 return Err(WithReturnCode::new(
                     extism_pdk::Error::msg("Not supported"),
@@ -252,13 +337,13 @@ fn lookup_book_records_for_images(
         let mut records = Vec::new();
 
         if let Some(isbn13) = ids.isbn13.as_deref() {
-            records.extend(fetch_by_isbn(isbn13)?);
+            records.extend(fetch_by_isbn(isbn13, false)?);
         }
         if let Some(edition_id) = ids.edition_id.as_deref() {
-            records.extend(fetch_by_edition(edition_id)?);
+            records.extend(fetch_by_edition(edition_id, false)?);
         }
         if let Some(work_id) = ids.work_id.as_deref() {
-            records.extend(fetch_by_work(work_id)?);
+            records.extend(fetch_by_work(work_id, false)?);
         }
 
         return Ok((records, Some(RsLookupMatchType::ExactId)));
@@ -278,7 +363,10 @@ pub fn lookup_metadata(
         .map(|book| openlibrary_book_to_result(book, match_type.clone()))
         .collect();
 
-    Ok(Json(RsLookupMetadataResults { results, next_page_key: None }))
+    Ok(Json(RsLookupMetadataResults {
+        results,
+        next_page_key: None,
+    }))
 }
 
 #[plugin_fn]
@@ -315,6 +403,7 @@ mod tests {
                 ids.set("openlibrary_work_id", "works/OL45804W");
                 ids
             }),
+            ..Default::default()
         });
 
         let ids = extract_book_ids(&query).expect("Expected ids");

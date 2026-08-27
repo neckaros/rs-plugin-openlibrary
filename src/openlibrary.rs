@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OpenLibrarySearchResponse {
@@ -29,6 +29,12 @@ pub struct OpenLibrarySearchDoc {
     #[serde(default)]
     pub publisher: Vec<String>,
     pub number_of_pages_median: Option<i64>,
+    #[serde(default)]
+    pub series_key: Vec<String>,
+    #[serde(default)]
+    pub series_name: Vec<String>,
+    #[serde(default)]
+    pub series_position: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -43,6 +49,27 @@ pub struct OpenLibraryWorkResponse {
     #[serde(default)]
     pub subjects: Vec<String>,
     pub first_publish_date: Option<String>,
+    #[serde(default)]
+    pub series: Vec<OpenLibraryWorkSeriesEdge>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenLibraryWorkSeriesEdge {
+    pub series: OpenLibrarySeriesRef,
+    pub position: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenLibrarySeriesRef {
+    #[serde(default)]
+    pub key: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenLibrarySeriesResponse {
+    #[serde(default)]
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -107,6 +134,23 @@ impl OpenLibraryDescription {
     }
 }
 
+#[derive(Debug, Serialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenLibrarySeriesRecord {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub position: Option<String>,
+}
+
+impl OpenLibrarySeriesRecord {
+    pub fn numeric_position(&self) -> Option<f64> {
+        self.position
+            .as_deref()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct OpenLibraryBookRecord {
     pub title: String,
@@ -123,6 +167,7 @@ pub struct OpenLibraryBookRecord {
     pub author_keys: Vec<String>,
     pub subjects: Vec<String>,
     pub publishers: Vec<String>,
+    pub series: Vec<OpenLibrarySeriesRecord>,
 }
 
 impl OpenLibraryBookRecord {
@@ -137,6 +182,16 @@ impl OpenLibraryBookRecord {
             return format!("isbn13:{isbn13}");
         }
         format!("title:{}", self.title.to_ascii_lowercase())
+    }
+
+    pub fn primary_series(&self) -> Option<&OpenLibrarySeriesRecord> {
+        self.series.iter().find(|series| {
+            series
+                .name
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|name| !name.is_empty())
+        })
     }
 }
 
@@ -243,6 +298,10 @@ pub fn build_work_editions_url(work_id: &str) -> String {
     format!("https://openlibrary.org/works/{work_id}/editions.json?limit=1")
 }
 
+pub fn build_series_url(series_id: &str) -> String {
+    format!("https://openlibrary.org/series/{series_id}.json")
+}
+
 pub fn build_cover_url_from_id(cover_id: u64) -> String {
     format!("https://covers.openlibrary.org/b/id/{cover_id}-L.jpg")
 }
@@ -263,6 +322,7 @@ pub fn book_record_from_search_doc(doc: &OpenLibrarySearchDoc) -> Option<OpenLib
         .and_then(|value| normalize_openlibrary_id(value, "books"));
 
     let work_id = normalize_openlibrary_id(&doc.key, "works");
+    let series = series_records_from_search_doc(doc);
 
     Some(OpenLibraryBookRecord {
         title: title.to_string(),
@@ -283,6 +343,7 @@ pub fn book_record_from_search_doc(doc: &OpenLibrarySearchDoc) -> Option<OpenLib
         author_keys: doc.author_key.clone(),
         subjects: doc.subject.clone(),
         publishers: doc.publisher.clone(),
+        series,
     })
 }
 
@@ -322,6 +383,7 @@ pub fn book_record_from_edition_response(
         author_keys: vec![],
         subjects: vec![],
         publishers: response.publishers.clone(),
+        series: vec![],
     }
 }
 
@@ -349,6 +411,20 @@ pub fn book_record_from_work_response(response: &OpenLibraryWorkResponse) -> Ope
         author_keys: vec![],
         subjects: response.subjects.clone(),
         publishers: vec![],
+        series: response
+            .series
+            .iter()
+            .filter_map(|edge| {
+                let id = normalize_openlibrary_id(&edge.series.key, "series");
+                let name = non_empty_string(edge.series.name.as_deref());
+                let position = non_empty_string(edge.position.as_deref());
+                if id.is_none() && name.is_none() {
+                    None
+                } else {
+                    Some(OpenLibrarySeriesRecord { id, name, position })
+                }
+            })
+            .collect(),
     }
 }
 
@@ -419,7 +495,59 @@ pub fn merge_work_with_edition(
         } else {
             edition.publishers
         },
+        series: if work.series.is_empty() {
+            edition.series
+        } else {
+            work.series
+        },
     }
+}
+
+pub fn merge_work_series_into_edition(
+    mut edition: OpenLibraryBookRecord,
+    work: OpenLibraryBookRecord,
+) -> OpenLibraryBookRecord {
+    if !work.series.is_empty() {
+        edition.series = work.series;
+    }
+    edition
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn series_records_from_search_doc(doc: &OpenLibrarySearchDoc) -> Vec<OpenLibrarySeriesRecord> {
+    let count = doc
+        .series_key
+        .len()
+        .max(doc.series_name.len())
+        .max(doc.series_position.len());
+    let mut records = Vec::new();
+
+    for index in 0..count {
+        let id = doc
+            .series_key
+            .get(index)
+            .and_then(|value| normalize_openlibrary_id(value, "series"));
+        let name = doc
+            .series_name
+            .get(index)
+            .and_then(|value| non_empty_string(Some(value)));
+        let position = doc
+            .series_position
+            .get(index)
+            .and_then(|value| non_empty_string(Some(value)));
+
+        if id.is_some() || name.is_some() {
+            records.push(OpenLibrarySeriesRecord { id, name, position });
+        }
+    }
+
+    records
 }
 
 #[cfg(test)]
@@ -469,11 +597,104 @@ mod tests {
             subject: vec!["Fantasy".to_string()],
             publisher: vec!["Allen & Unwin".to_string()],
             number_of_pages_median: None,
+            series_key: vec![],
+            series_name: vec![],
+            series_position: vec![],
         };
 
         let record = book_record_from_search_doc(&doc).expect("Expected mapped record");
         assert_eq!(record.authors, vec!["J.R.R. Tolkien".to_string()]);
         assert_eq!(record.author_keys, vec!["OL26320A".to_string()]);
+    }
+
+    #[test]
+    fn search_doc_maps_aligned_series_metadata() {
+        let doc: OpenLibrarySearchDoc = serde_json::from_value(serde_json::json!({
+            "key": "/works/OL27513W",
+            "title": "The Fellowship of the Ring",
+            "series_key": ["OL330052L"],
+            "series_name": ["The Lord of the Rings"],
+            "series_position": ["1"]
+        }))
+        .unwrap();
+
+        let record = book_record_from_search_doc(&doc).expect("Expected mapped record");
+        assert_eq!(
+            record.series,
+            vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1".to_string()),
+            }]
+        );
+        assert_eq!(
+            record.primary_series().unwrap().numeric_position(),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn search_doc_handles_mismatched_series_arrays() {
+        let doc: OpenLibrarySearchDoc = serde_json::from_value(serde_json::json!({
+            "key": "/works/OL27513W",
+            "title": "The Fellowship of the Ring",
+            "series_key": ["OL330052L", "OL999L"],
+            "series_name": ["The Lord of the Rings"],
+            "series_position": ["1", ""]
+        }))
+        .unwrap();
+
+        let record = book_record_from_search_doc(&doc).expect("Expected mapped record");
+        assert_eq!(record.series.len(), 2);
+        assert_eq!(
+            record.series[0].name.as_deref(),
+            Some("The Lord of the Rings")
+        );
+        assert_eq!(record.series[1].id.as_deref(), Some("OL999L"));
+        assert_eq!(record.series[1].name, None);
+    }
+
+    #[test]
+    fn work_response_maps_nested_series_edge() {
+        let response: OpenLibraryWorkResponse = serde_json::from_value(serde_json::json!({
+            "key": "/works/OL27513W",
+            "title": "The Fellowship of the Ring",
+            "series": [{
+                "series": { "key": "/series/OL330052L" },
+                "position": "1"
+            }]
+        }))
+        .unwrap();
+
+        let record = book_record_from_work_response(&response);
+        assert_eq!(
+            record.series,
+            vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: None,
+                position: Some("1".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn series_positions_only_parse_plain_finite_numbers() {
+        let numeric = OpenLibrarySeriesRecord {
+            position: Some("2.5".to_string()),
+            ..Default::default()
+        };
+        let range = OpenLibrarySeriesRecord {
+            position: Some("1-3".to_string()),
+            ..Default::default()
+        };
+        let infinite = OpenLibrarySeriesRecord {
+            position: Some("inf".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(numeric.numeric_position(), Some(2.5));
+        assert_eq!(range.numeric_position(), None);
+        assert_eq!(infinite.numeric_position(), None);
     }
 
     #[test]
@@ -503,6 +724,11 @@ mod tests {
             work_id: Some("OL45804W".to_string()),
             cover_ids: vec![2701529, 2701530, 6307679],
             cover_id: Some(2701529),
+            series: vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1".to_string()),
+            }],
             ..Default::default()
         };
 
@@ -517,6 +743,41 @@ mod tests {
         let merged = merge_work_with_edition(work, Some(edition));
         assert_eq!(merged.cover_ids, vec![2701529, 2701530, 6307679, 9999999]);
         assert_eq!(merged.cover_id, Some(2701529));
+        assert_eq!(merged.series.len(), 1);
+        assert_eq!(merged.series[0].position.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn series_enrichment_preserves_edition_metadata() {
+        let edition = OpenLibraryBookRecord {
+            title: "La Communauté de l'anneau".to_string(),
+            description: Some("French edition description".to_string()),
+            pages: Some(544),
+            edition_id: Some("OL123M".to_string()),
+            ..Default::default()
+        };
+        let work = OpenLibraryBookRecord {
+            title: "The Fellowship of the Ring".to_string(),
+            description: Some("Generic work description".to_string()),
+            pages: Some(423),
+            series: vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let enriched = merge_work_series_into_edition(edition, work);
+        assert_eq!(enriched.title, "La Communauté de l'anneau");
+        assert_eq!(
+            enriched.description.as_deref(),
+            Some("French edition description")
+        );
+        assert_eq!(enriched.pages, Some(544));
+        assert_eq!(enriched.edition_id.as_deref(), Some("OL123M"));
+        assert_eq!(enriched.series.len(), 1);
+        assert_eq!(enriched.series[0].position.as_deref(), Some("1"));
     }
 }
 fn positive_cover_id(value: i64) -> Option<u64> {
