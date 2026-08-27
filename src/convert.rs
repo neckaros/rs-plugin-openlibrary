@@ -2,9 +2,11 @@ use rs_plugin_common_interfaces::{
     domain::{
         book::Book,
         external_images::{ExternalImage, ImageType},
+        media::FileEpisode,
         other_ids::OtherIds,
         person::Person,
         rs_ids::RsIds,
+        serie::{Serie, SerieType},
         tag::Tag,
         Relations,
     },
@@ -251,6 +253,61 @@ fn build_tags_details(record: &OpenLibraryBookRecord) -> Option<Vec<Tag>> {
     }
 }
 
+fn build_series_relations(
+    record: &OpenLibraryBookRecord,
+) -> (Option<Vec<FileEpisode>>, Option<Vec<Serie>>) {
+    let mut references = Vec::new();
+    let mut details = Vec::new();
+
+    for series in &record.series {
+        let Some(name) = series
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let identity = series.id.as_deref().unwrap_or(name);
+        let relation_id = format!("openlib-series:{}", relation_key(identity));
+        let mut params = serde_json::Map::new();
+        if let Some(series_id) = &series.id {
+            params.insert("openlibrarySeriesId".to_string(), json!(series_id));
+        }
+        if let Some(position) = &series.position {
+            params.insert("openlibrarySeriesPosition".to_string(), json!(position));
+        }
+
+        references.push(FileEpisode {
+            id: relation_id.clone(),
+            season: series.numeric_position().and_then(position_as_u32),
+            episode: None,
+            episode_to: None,
+        });
+        details.push(Serie {
+            id: relation_id.clone(),
+            name: name.to_string(),
+            kind: Some(SerieType::Book),
+            params: Some(serde_json::Value::Object(params)),
+            otherids: Some(OtherIds(vec![relation_id])),
+            ..Default::default()
+        });
+    }
+
+    (
+        (!references.is_empty()).then_some(references),
+        (!details.is_empty()).then_some(details),
+    )
+}
+
+fn position_as_u32(position: f64) -> Option<u32> {
+    if position > 0.0 && position.fract() == 0.0 && position <= u32::MAX as f64 {
+        Some(position as u32)
+    } else {
+        None
+    }
+}
+
 fn build_params(record: &OpenLibraryBookRecord) -> serde_json::Value {
     let mut params = serde_json::Map::new();
 
@@ -269,11 +326,17 @@ fn build_params(record: &OpenLibraryBookRecord) -> serde_json::Value {
     if let Some(work_id) = &record.work_id {
         params.insert("openlibraryWorkId".to_string(), json!(work_id));
     }
+    if !record.series.is_empty() {
+        params.insert("series".to_string(), json!(record.series));
+    }
 
     serde_json::Value::Object(params)
 }
 
-pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord, match_type: Option<RsLookupMatchType>) -> RsLookupMetadataResultWrapper {
+pub fn openlibrary_book_to_result(
+    record: OpenLibraryBookRecord,
+    match_type: Option<RsLookupMatchType>,
+) -> RsLookupMetadataResultWrapper {
     let images = build_images(&record);
     let ext_images = if images.is_empty() {
         None
@@ -282,11 +345,21 @@ pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord, match_type: Opt
     };
     let people_details = build_people_details(&record);
     let tags_details = build_tags_details(&record);
+    let (series, series_details) = build_series_relations(&record);
+    let volume = record
+        .primary_series()
+        .and_then(|series| series.numeric_position());
 
-    let relations = if ext_images.is_some() || people_details.is_some() || tags_details.is_some() {
+    let relations = if ext_images.is_some()
+        || people_details.is_some()
+        || tags_details.is_some()
+        || series_details.is_some()
+    {
         Some(Relations {
             people_details,
             tags_details,
+            series,
+            series_details,
             ext_images,
             ..Default::default()
         })
@@ -300,7 +373,7 @@ pub fn openlibrary_book_to_result(record: OpenLibraryBookRecord, match_type: Opt
         name: record.title,
         kind: Some("book".to_string()),
         serie_ref: None,
-        volume: None,
+        volume,
         chapter: None,
         year: record.publish_year,
         airdate: None,
@@ -331,6 +404,7 @@ pub fn openlibrary_book_to_images(record: &OpenLibraryBookRecord) -> Vec<Externa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openlibrary::OpenLibrarySeriesRecord;
 
     #[test]
     fn prefers_cover_id_for_images() {
@@ -381,7 +455,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = openlibrary_book_to_result(record);
+        let result = openlibrary_book_to_result(record, None);
 
         if let RsLookupMetadataResult::Book(book) = result.metadata {
             assert_eq!(book.id, "isbn13:9780140328721".to_string());
@@ -402,7 +476,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = openlibrary_book_to_result(record);
+        let result = openlibrary_book_to_result(record, None);
 
         if let RsLookupMetadataResult::Book(book) = result.metadata {
             assert_eq!(book.id, "olwid:OL45804W".to_string());
@@ -419,7 +493,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = openlibrary_book_to_result(record);
+        let result = openlibrary_book_to_result(record, None);
 
         if let RsLookupMetadataResult::Book(book) = result.metadata {
             assert_eq!(book.id, "isbn13:9780140328721".to_string());
@@ -435,7 +509,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = openlibrary_book_to_result(record);
+        let result = openlibrary_book_to_result(record, None);
 
         if let RsLookupMetadataResult::Book(book) = result.metadata {
             assert_eq!(book.id, "openlibrary-title-the-hobbit".to_string());
@@ -455,7 +529,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = openlibrary_book_to_result(record);
+        let result = openlibrary_book_to_result(record, None);
         let relations = result.relations.expect("Expected relations");
 
         let images = relations.ext_images.expect("Expected ext_images");
@@ -487,5 +561,75 @@ mod tests {
 
         assert!(relations.people.is_none());
         assert!(relations.tags.is_none());
+    }
+
+    #[test]
+    fn maps_series_and_position_to_book_metadata() {
+        let record = OpenLibraryBookRecord {
+            title: "The Fellowship of the Ring".to_string(),
+            series: vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let result = openlibrary_book_to_result(record, None);
+        let book = match result.metadata {
+            RsLookupMetadataResult::Book(book) => book,
+            _ => panic!("Expected Book metadata"),
+        };
+        assert_eq!(book.volume, Some(1.0));
+        assert_eq!(
+            book.params
+                .as_ref()
+                .and_then(|params| params.get("series"))
+                .and_then(|series| series.get(0))
+                .and_then(|series| series.get("position"))
+                .and_then(|position| position.as_str()),
+            Some("1")
+        );
+
+        let relations = result.relations.expect("Expected series relations");
+        let series_details = relations.series_details.expect("Expected series details");
+        assert_eq!(series_details.len(), 1);
+        assert_eq!(series_details[0].id, "openlib-series:ol330052l");
+        assert_eq!(series_details[0].name, "The Lord of the Rings");
+        assert_eq!(series_details[0].kind, Some(SerieType::Book));
+
+        let series_refs = relations.series.expect("Expected series references");
+        assert_eq!(series_refs.len(), 1);
+        assert_eq!(series_refs[0].id, "openlib-series:ol330052l");
+        assert_eq!(series_refs[0].season, Some(1));
+    }
+
+    #[test]
+    fn preserves_non_numeric_series_position_without_setting_volume() {
+        let record = OpenLibraryBookRecord {
+            title: "The Lord of the Rings".to_string(),
+            series: vec![OpenLibrarySeriesRecord {
+                id: Some("OL330052L".to_string()),
+                name: Some("The Lord of the Rings".to_string()),
+                position: Some("1-3".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let result = openlibrary_book_to_result(record, None);
+        let book = match result.metadata {
+            RsLookupMetadataResult::Book(book) => book,
+            _ => panic!("Expected Book metadata"),
+        };
+        assert_eq!(book.volume, None);
+        assert_eq!(
+            book.params
+                .as_ref()
+                .and_then(|params| params.get("series"))
+                .and_then(|series| series.get(0))
+                .and_then(|series| series.get("position"))
+                .and_then(|position| position.as_str()),
+            Some("1-3")
+        );
     }
 }
