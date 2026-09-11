@@ -346,3 +346,11 @@ fn test_lookup_work_exposes_series_and_position() {
         Some(1)
     );
 }
+
+#[test]
+fn test_infos_version_matches_package_release() {
+    let mut plugin = build_plugin();
+    let output = plugin.call::<&str, String>("infos", "").unwrap();
+    let info: rs_plugin_common_interfaces::PluginInformation = serde_json::from_str(&output).unwrap();
+    assert_eq!(info.version.to_string(), env!("CARGO_PKG_VERSION_MINOR"));
+}

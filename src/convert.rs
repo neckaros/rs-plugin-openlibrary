@@ -4,7 +4,7 @@ use rs_plugin_common_interfaces::{
         external_images::{ExternalImage, ImageType},
         media::FileEpisode,
         other_ids::OtherIds,
-        person::Person,
+        person::{Person, PersonType},
         rs_ids::RsIds,
         serie::{Serie, SerieType},
         tag::Tag,
@@ -193,7 +193,7 @@ fn build_people_details(record: &OpenLibraryBookRecord) -> Option<Vec<Person>> {
         people.push(Person {
             id: other_id.clone(),
             name: name.to_string(),
-            kind: Some("author".to_string()),
+            kind: Some(PersonType::Author),
             params: if params.is_empty() {
                 None
             } else {
@@ -543,6 +543,8 @@ mod tests {
         assert_eq!(people.len(), 1);
         assert_eq!(people[0].id, "openlib-person:j-r-r-tolkien-ol26320a");
         assert_eq!(people[0].name, "J.R.R. Tolkien");
+        assert_eq!(people[0].kind, Some(PersonType::Author));
+        assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
         assert_eq!(
             people[0].otherids,
             Some(OtherIds(vec![
