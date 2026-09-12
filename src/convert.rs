@@ -356,6 +356,8 @@ pub fn openlibrary_book_to_result(
         || series_details.is_some()
     {
         Some(Relations {
+            people_roles: people_details.as_ref().map(|people| people.iter().map(|person|
+                (person.id.clone(), vec![PersonType::Author])).collect()),
             people_details,
             tags_details,
             series,
@@ -544,6 +546,7 @@ mod tests {
         assert_eq!(people[0].id, "openlib-person:j-r-r-tolkien-ol26320a");
         assert_eq!(people[0].name, "J.R.R. Tolkien");
         assert_eq!(people[0].kind, Some(PersonType::Author));
+        assert_eq!(relations.people_roles.as_ref().unwrap()[&people[0].id], vec![PersonType::Author]);
         assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
         assert_eq!(
             people[0].otherids,
