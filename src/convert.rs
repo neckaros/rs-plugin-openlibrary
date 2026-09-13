@@ -4,7 +4,7 @@ use rs_plugin_common_interfaces::{
         external_images::{ExternalImage, ImageType},
         media::FileEpisode,
         other_ids::OtherIds,
-        person::{Person, PersonType},
+        person::{Person, PersonType, PersonWithRoles},
         rs_ids::RsIds,
         serie::{Serie, SerieType},
         tag::Tag,
@@ -156,7 +156,7 @@ fn build_images(record: &OpenLibraryBookRecord) -> Vec<ExternalImage> {
     }
 }
 
-fn build_people_details(record: &OpenLibraryBookRecord) -> Option<Vec<Person>> {
+fn build_people_details(record: &OpenLibraryBookRecord) -> Option<Vec<PersonWithRoles>> {
     let mut people: Vec<Person> = Vec::new();
     let mut seen_ids: Vec<String> = Vec::new();
 
@@ -208,7 +208,16 @@ fn build_people_details(record: &OpenLibraryBookRecord) -> Option<Vec<Person>> {
     if people.is_empty() {
         None
     } else {
-        Some(people)
+        Some(
+            people
+                .into_iter()
+                .map(|person| PersonWithRoles {
+                    person,
+                    roles: Some(vec![PersonType::Author]),
+                    ..Default::default()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -356,8 +365,6 @@ pub fn openlibrary_book_to_result(
         || series_details.is_some()
     {
         Some(Relations {
-            people_roles: people_details.as_ref().map(|people| people.iter().map(|person|
-                (person.id.clone(), vec![PersonType::Author])).collect()),
             people_details,
             tags_details,
             series,
@@ -543,13 +550,14 @@ mod tests {
 
         let people = relations.people_details.expect("Expected people_details");
         assert_eq!(people.len(), 1);
-        assert_eq!(people[0].id, "openlib-person:j-r-r-tolkien-ol26320a");
-        assert_eq!(people[0].name, "J.R.R. Tolkien");
-        assert_eq!(people[0].kind, Some(PersonType::Author));
-        assert_eq!(relations.people_roles.as_ref().unwrap()[&people[0].id], vec![PersonType::Author]);
+        assert_eq!(people[0].person.id, "openlib-person:j-r-r-tolkien-ol26320a");
+        assert_eq!(people[0].person.name, "J.R.R. Tolkien");
+        assert_eq!(people[0].person.kind, Some(PersonType::Author));
+        assert_eq!(people[0].roles, Some(vec![PersonType::Author]));
+        assert_eq!(people[0].rank, None);
         assert_eq!(serde_json::to_value(&people[0]).unwrap()["type"], "Author");
         assert_eq!(
-            people[0].otherids,
+            people[0].person.otherids,
             Some(OtherIds(vec![
                 "openlib-person:j-r-r-tolkien-ol26320a".to_string()
             ]))
