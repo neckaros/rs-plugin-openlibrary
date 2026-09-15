@@ -2,10 +2,10 @@ use extism_pdk::{http, log, plugin_fn, FnResult, HttpRequest, Json, LogLevel, Wi
 use std::collections::HashSet;
 
 use rs_plugin_common_interfaces::{
-    domain::external_images::ExternalImage,
+    domain::{external_images::ExternalImage, person::PersonType, rs_ids::RsIds},
     lookup::{
-        RsLookupMatchType, RsLookupMetadataResultWrapper, RsLookupMetadataResults, RsLookupQuery,
-        RsLookupWrapper,
+        RsLookupBook, RsLookupMatchType, RsLookupMetadataResultWrapper, RsLookupMetadataResults,
+        RsLookupQuery, RsLookupWrapper,
     },
     PluginInformation, PluginType,
 };
@@ -266,6 +266,247 @@ fn deduplicate_images(images: Vec<ExternalImage>) -> Vec<ExternalImage> {
     deduped
 }
 
+fn build_book_search_query(book: &RsLookupBook) -> Option<String> {
+    let mut clauses = Vec::new();
+
+    if let Some(name) = non_empty(book.name.as_deref()) {
+        if let Some(isbn) = normalize_exact_isbn_search(name) {
+            clauses.push(field_clause("isbn", &isbn));
+        } else {
+            clauses.push(field_clause("title", name));
+        }
+    }
+    if let Some(author) = non_empty(book.author.as_deref()) {
+        clauses.push(field_clause("author", author));
+    }
+    if let Some(ids) = book.ids.as_ref() {
+        if let Some(isbn) = ids.isbn13().and_then(normalize_isbn13) {
+            clauses.push(field_clause("isbn", &isbn));
+        }
+        if let Some(edition_id) = ids
+            .openlibrary_edition_id()
+            .and_then(|value| normalize_openlibrary_id(value, "books"))
+        {
+            clauses.push(field_clause("edition_key", &edition_id));
+        }
+        if let Some(work_id) = ids
+            .openlibrary_work_id()
+            .and_then(|value| normalize_openlibrary_id(value, "works"))
+        {
+            clauses.push(field_clause("key", &work_id));
+        }
+    }
+
+    for person in book.people.as_deref().unwrap_or_default() {
+        if person
+            .role
+            .as_ref()
+            .is_some_and(|role| role != &PersonType::Author)
+        {
+            return None;
+        }
+
+        let clause = person
+            .ids
+            .as_ref()
+            .and_then(|ids| find_olid(ids, 'A'))
+            .map(|id| field_clause("author_key", &id))
+            .or_else(|| {
+                non_empty(person.name.as_deref()).map(|name| field_clause("author", name))
+            })?;
+        clauses.push(clause);
+    }
+
+    for series in book.series.as_deref().unwrap_or_default() {
+        let clause = series
+            .ids
+            .as_ref()
+            .and_then(|ids| find_olid(ids, 'L'))
+            .map(|id| field_clause("series_key", &id))
+            .or_else(|| {
+                non_empty(series.name.as_deref()).map(|name| field_clause("series_name", name))
+            })?;
+        clauses.push(clause);
+    }
+
+    for tag in book.tags.as_deref().unwrap_or_default() {
+        let clause = tag
+            .ids
+            .as_ref()
+            .and_then(openlibrary_subject_key)
+            .map(|key| field_clause("subject_key", &key))
+            .or_else(|| non_empty(tag.name.as_deref()).map(|name| field_clause("subject", name)))?;
+        clauses.push(clause);
+    }
+
+    (!clauses.is_empty()).then(|| clauses.join(" AND "))
+}
+
+fn book_matches_filters(book: &RsLookupBook, record: &OpenLibraryBookRecord) -> bool {
+    for person in book.people.as_deref().unwrap_or_default() {
+        if person
+            .role
+            .as_ref()
+            .is_some_and(|role| role != &PersonType::Author)
+        {
+            return false;
+        }
+        let matches_name = person.name.as_deref().is_some_and(|name| {
+            record
+                .authors
+                .iter()
+                .any(|author| normalized(author) == normalized(name))
+        });
+        let matches_id = person
+            .ids
+            .as_ref()
+            .and_then(|ids| find_olid(ids, 'A'))
+            .is_some_and(|id| {
+                record
+                    .author_keys
+                    .iter()
+                    .any(|author_id| author_id.eq_ignore_ascii_case(&id))
+            });
+        if !matches_name && !matches_id {
+            return false;
+        }
+    }
+
+    for series in book.series.as_deref().unwrap_or_default() {
+        let matches_name = series.name.as_deref().is_some_and(|name| {
+            record.series.iter().any(|series| {
+                series
+                    .name
+                    .as_deref()
+                    .is_some_and(|candidate| normalized(candidate) == normalized(name))
+            })
+        });
+        let matches_id = series
+            .ids
+            .as_ref()
+            .and_then(|ids| find_olid(ids, 'L'))
+            .is_some_and(|id| {
+                record.series.iter().any(|series| {
+                    series
+                        .id
+                        .as_deref()
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&id))
+                })
+            });
+        if !matches_name && !matches_id {
+            return false;
+        }
+    }
+
+    for tag in book.tags.as_deref().unwrap_or_default() {
+        let matches_name = tag.name.as_deref().is_some_and(|name| {
+            record
+                .subjects
+                .iter()
+                .any(|subject| normalized(subject) == normalized(name))
+        });
+        let matches_id = tag
+            .ids
+            .as_ref()
+            .and_then(openlibrary_subject_key)
+            .is_some_and(|key| {
+                record
+                    .subjects
+                    .iter()
+                    .any(|subject| subject_key(subject) == key)
+            });
+        if !matches_name && !matches_id {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn has_relation_filters(book: &RsLookupBook) -> bool {
+    book.people
+        .as_ref()
+        .is_some_and(|values| !values.is_empty())
+        || book
+            .series
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        || book.tags.as_ref().is_some_and(|values| !values.is_empty())
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn field_clause(field: &str, value: &str) -> String {
+    format!("{field}:\"{}\"", escape_query_phrase(value))
+}
+
+fn escape_query_phrase(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn find_olid(ids: &RsIds, suffix: char) -> Option<String> {
+    ids.iter()
+        .find_map(|(_, value)| extract_olid(value, suffix))
+}
+
+fn extract_olid(value: &str, suffix: char) -> Option<String> {
+    let upper = value.to_ascii_uppercase();
+    for (start, _) in upper.match_indices("OL") {
+        let candidate = &upper[start..];
+        let digits = candidate[2..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .count();
+        if digits > 0 && candidate.chars().nth(2 + digits) == Some(suffix) {
+            return Some(candidate[..3 + digits].to_string());
+        }
+    }
+    None
+}
+
+fn openlibrary_subject_key(ids: &RsIds) -> Option<String> {
+    ids.iter().find_map(|(source, value)| {
+        matches!(
+            source.as_str(),
+            "openlib-tag" | "openlibrary-subject" | "subject" | "subject-key"
+        )
+        .then(|| subject_key(value))
+        .filter(|value| !value.is_empty())
+    })
+}
+
+fn normalized(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+fn subject_key(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('/')
+        .strip_prefix("subjects/")
+        .unwrap_or(value.trim().trim_matches('/'))
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '(' | ')') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 fn lookup_book_records(
     lookup: &RsLookupWrapper,
 ) -> FnResult<(Vec<OpenLibraryBookRecord>, Option<RsLookupMatchType>)> {
@@ -281,7 +522,22 @@ fn lookup_book_records(
         }
     }
 
-    let (records, match_type) = if let Some(isbn13) = ids.isbn13 {
+    let validate_exact_match_with_search = match &lookup.query {
+        RsLookupQuery::Book(book) => {
+            has_relation_filters(book)
+                && (ids.isbn13.is_some() || ids.edition_id.is_some() || ids.work_id.is_some())
+        }
+        _ => false,
+    };
+
+    let (records, match_type) = if validate_exact_match_with_search {
+        let search = match &lookup.query {
+            RsLookupQuery::Book(book) => build_book_search_query(book),
+            _ => None,
+        }
+        .ok_or_else(|| WithReturnCode::new(extism_pdk::Error::msg("Not supported"), 404))?;
+        (fetch_by_search(&search)?, Some(RsLookupMatchType::ExactId))
+    } else if let Some(isbn13) = ids.isbn13 {
         (
             fetch_by_isbn(&isbn13, true)?,
             Some(RsLookupMatchType::ExactId),
@@ -298,14 +554,15 @@ fn lookup_book_records(
         )
     } else {
         let search = match &lookup.query {
-            RsLookupQuery::Book(book) => book.name.as_deref(),
+            RsLookupQuery::Book(book) => build_book_search_query(book),
             _ => None,
         };
 
         match search {
-            Some(name) if !name.trim().is_empty() => {
-                (fetch_by_search(name)?, Some(RsLookupMatchType::ExactText))
-            }
+            Some(search) => (
+                fetch_by_search(&search)?,
+                Some(RsLookupMatchType::ExactText),
+            ),
             _ => {
                 return Err(WithReturnCode::new(
                     extism_pdk::Error::msg("Not supported"),
@@ -313,6 +570,14 @@ fn lookup_book_records(
                 ));
             }
         }
+    };
+
+    let records = match &lookup.query {
+        RsLookupQuery::Book(book) => records
+            .into_iter()
+            .filter(|record| book_matches_filters(book, record))
+            .collect(),
+        _ => records,
     };
 
     Ok((deduplicate_records(records), match_type))
@@ -333,7 +598,12 @@ fn lookup_book_records_for_images(
         }
     }
 
-    if ids.isbn13.is_some() || ids.edition_id.is_some() || ids.work_id.is_some() {
+    let has_filters = match &lookup.query {
+        RsLookupQuery::Book(book) => has_relation_filters(book),
+        _ => false,
+    };
+
+    if (ids.isbn13.is_some() || ids.edition_id.is_some() || ids.work_id.is_some()) && !has_filters {
         let mut records = Vec::new();
 
         if let Some(isbn13) = ids.isbn13.as_deref() {
@@ -344,6 +614,10 @@ fn lookup_book_records_for_images(
         }
         if let Some(work_id) = ids.work_id.as_deref() {
             records.extend(fetch_by_work(work_id, false)?);
+        }
+
+        if let RsLookupQuery::Book(book) = &lookup.query {
+            records.retain(|record| book_matches_filters(book, record));
         }
 
         return Ok((records, Some(RsLookupMatchType::ExactId)));
@@ -390,7 +664,9 @@ pub fn lookup_metadata_images(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rs_plugin_common_interfaces::{domain::rs_ids::RsIds, lookup::RsLookupBook};
+    use rs_plugin_common_interfaces::lookup::{
+        RsLookupPersonFilter, RsLookupSerieFilter, RsLookupTagFilter,
+    };
 
     #[test]
     fn book_query_extracts_ids() {
@@ -478,5 +754,106 @@ mod tests {
             deduped[1].url.url,
             "https://covers.openlibrary.org/b/id/2-L.jpg"
         );
+    }
+
+    #[test]
+    fn book_search_query_combines_relation_names_and_optional_roles() {
+        let book = RsLookupBook {
+            name: Some("The Left Hand of Darkness".to_string()),
+            people: Some(vec![RsLookupPersonFilter {
+                name: Some("Ursula K. Le Guin".to_string()),
+                role: None,
+                ..Default::default()
+            }]),
+            series: Some(vec![RsLookupSerieFilter {
+                name: Some("Hainish Cycle".to_string()),
+                ..Default::default()
+            }]),
+            tags: Some(vec![RsLookupTagFilter {
+                name: Some("Science Fiction".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_book_search_query(&book).as_deref(),
+            Some(
+                "title:\"The Left Hand of Darkness\" AND author:\"Ursula K. Le Guin\" AND series_name:\"Hainish Cycle\" AND subject:\"Science Fiction\""
+            )
+        );
+    }
+
+    #[test]
+    fn book_search_query_uses_openlibrary_relation_ids() {
+        let mut person_ids = RsIds::default();
+        person_ids.set("openlib-person", "j-r-r-tolkien-ol26320a");
+        let mut series_ids = RsIds::default();
+        series_ids.set("openlib-series", "ol330052l");
+        let mut tag_ids = RsIds::default();
+        tag_ids.set("openlib-tag", "science-fiction");
+        let book = RsLookupBook {
+            people: Some(vec![RsLookupPersonFilter {
+                ids: Some(person_ids),
+                role: Some(PersonType::Author),
+                ..Default::default()
+            }]),
+            series: Some(vec![RsLookupSerieFilter {
+                ids: Some(series_ids),
+                ..Default::default()
+            }]),
+            tags: Some(vec![RsLookupTagFilter {
+                ids: Some(tag_ids),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_book_search_query(&book).as_deref(),
+            Some(
+                "author_key:\"OL26320A\" AND series_key:\"OL330052L\" AND subject_key:\"science_fiction\""
+            )
+        );
+    }
+
+    #[test]
+    fn book_search_query_rejects_non_author_roles() {
+        let book = RsLookupBook {
+            people: Some(vec![RsLookupPersonFilter {
+                name: Some("Someone".to_string()),
+                role: Some(PersonType::Custom("Editor".to_string())),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert_eq!(build_book_search_query(&book), None);
+    }
+
+    #[test]
+    fn direct_id_results_are_checked_against_relation_filters() {
+        let mut person_ids = RsIds::default();
+        person_ids.set("openlib-person", "tolkien-OL26320A");
+        let mut tag_ids = RsIds::default();
+        tag_ids.set("openlib-tag", "fantasy");
+        let query = RsLookupBook {
+            people: Some(vec![RsLookupPersonFilter {
+                ids: Some(person_ids),
+                ..Default::default()
+            }]),
+            tags: Some(vec![RsLookupTagFilter {
+                ids: Some(tag_ids),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let record = OpenLibraryBookRecord {
+            authors: vec!["J.R.R. Tolkien".to_string()],
+            author_keys: vec!["OL26320A".to_string()],
+            subjects: vec!["Fantasy".to_string()],
+            ..Default::default()
+        };
+
+        assert!(book_matches_filters(&query, &record));
     }
 }
